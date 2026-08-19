@@ -1,0 +1,10 @@
+---
+- name: My first Ansible playbook
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Display a message
+      ansible.builtin.debug:
+        msg: "Network automation lab is working"
