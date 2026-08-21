@@ -1,0 +1,14 @@
+---
+- name: Generate network device configurations
+  hosts:
+    - leafs
+    - spines
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Generate BGP configuration
+      ansible.builtin.template:
+        src: ../templates/bgp.j2
+        dest: "{{ playbook_dir }}/../configs/{{ inventory_hostname }}.cfg"
+        mode: "0644"
