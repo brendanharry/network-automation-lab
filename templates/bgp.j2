@@ -9,3 +9,6 @@ interface lo
 
 router bgp {{ asn }}
  bgp router-id {{ loopback_ip }}
+{% for neighbor in bgp_neighbors | default([]) %}
+ neighbor {{ neighbor.ip }} remote-as {{ neighbor.remote_as }}
+{% endfor %}
