@@ -1,0 +1,8 @@
+---
+asn: 65101
+loopback_ip: 10.255.0.11
+
+bgp_neighbors:
+  - name: spine01
+    ip: 10.0.0.0
+    remote_as: 65001
