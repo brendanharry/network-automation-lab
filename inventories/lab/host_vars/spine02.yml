@@ -2,6 +2,15 @@
 asn: 65002
 loopback_ip: 10.255.0.22
 
+underlay_interfaces:
+  - name: swp1
+    peer: leaf01
+    ip: 10.0.0.2/31
+
+  - name: swp2
+    peer: leaf02
+    ip: 10.0.0.6/31
+
 bgp_neighbors:
   - name: leaf01
     ip: 10.0.0.3

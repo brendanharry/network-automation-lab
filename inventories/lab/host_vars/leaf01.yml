@@ -2,6 +2,15 @@
 asn: 65101
 loopback_ip: 10.255.0.11
 
+underlay_interfaces:
+  - name: swp1
+    peer: spine01
+    ip: 10.0.0.1/31
+
+  - name: swp2
+    peer: spine02
+    ip: 10.0.0.3/31
+
 bgp_neighbors:
   - name: spine01
     ip: 10.0.0.0
