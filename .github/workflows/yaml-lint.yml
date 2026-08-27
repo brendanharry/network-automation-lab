@@ -19,3 +19,13 @@ jobs:
 
       - name: Run yamllint
         run: yamllint .
+
+      - name: Install Ansible
+        run: pip install ansible-core
+
+      - name: Run Ansible syntax check
+        run: >-
+          ansible-playbook
+          -i inventories/lab/hosts.yml
+          playbooks/build_configs.yml
+          --syntax-check
