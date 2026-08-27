@@ -6,3 +6,7 @@ bgp_neighbors:
   - name: spine01
     ip: 10.0.0.0
     remote_as: 65001
+
+  - name: spine02
+    ip: 10.0.0.2
+    remote_as: 65002
