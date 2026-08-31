@@ -29,3 +29,9 @@ jobs:
           -i inventories/lab/hosts.yml
           playbooks/build_configs.yml
           --syntax-check
+
+      - name: Run topology validation
+        run: >-
+          ansible-playbook
+          -i inventories/lab/hosts.yml
+          playbooks/validate_topology.yml
