@@ -1,0 +1,19 @@
+---
+- name: Validate network topology
+  hosts:
+    - leafs
+    - spines
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Check fabric connectivity
+      ansible.builtin.assert:
+        that:
+          - underlay_interfaces | default([]) | length == 2
+          - bgp_neighbors | default([]) | length == 2
+        fail_msg: >-
+          {{ inventory_hostname }} must have exactly two underlay interfaces
+          and two BGP neighbors.
+        success_msg: >-
+          {{ inventory_hostname }} topology data is valid.
