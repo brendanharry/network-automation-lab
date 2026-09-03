@@ -50,3 +50,40 @@
       loop: "{{ bgp_neighbors }}"
       loop_control:
         loop_var: neighbor
+
+- name: Validate fabric addressing
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    fabric_hosts: "{{ groups['leafs'] + groups['spines'] }}"
+    loopback_ips: >-
+      {{
+        fabric_hosts
+        | map('extract', hostvars, 'loopback_ip')
+        | list
+      }}
+
+    underlay_ips: >-
+      {{
+        fabric_hosts
+        | map('extract', hostvars, 'underlay_interfaces')
+        | map('map', attribute='ip')
+        | map('list')
+        | flatten
+      }}
+
+  tasks:
+    - name: Check for duplicate loopback addresses
+      ansible.builtin.assert:
+        that:
+          - loopback_ips | length == loopback_ips | unique | length
+        fail_msg: "Duplicate loopback IP addresses detected."
+        success_msg: "All loopback IP addresses are unique."
+
+    - name: Check for duplicate underlay addresses
+      ansible.builtin.assert:
+        that:
+          - underlay_ips | length == underlay_ips | unique | length
+        fail_msg: "Duplicate underlay IP addresses detected."
+        success_msg: "All underlay IP addresses are unique."
