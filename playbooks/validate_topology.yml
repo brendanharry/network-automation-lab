@@ -11,45 +11,10 @@
       ansible.builtin.assert:
         that:
           - underlay_interfaces | default([]) | length == 2
-          - bgp_neighbors | default([]) | length == 2
         fail_msg: >-
-          {{ inventory_hostname }} must have exactly two underlay interfaces
-          and two BGP neighbors.
+            {{ inventory_hostname }} must have exactly two underlay interfaces.
         success_msg: >-
-          {{ inventory_hostname }} topology data is valid.
-
-    - name: Check underlay and BGP peers match
-      ansible.builtin.assert:
-        that:
-          - >-
-            underlay_interfaces
-            | map(attribute='peer')
-            | sort
-            | list
-            ==
-            bgp_neighbors
-            | map(attribute='name')
-            | sort
-            | list
-        fail_msg: >-
-          {{ inventory_hostname }} underlay peers do not match
-          its BGP neighbors.
-        success_msg: >-
-          {{ inventory_hostname }} underlay and BGP peers match.
-
-    - name: Check BGP remote AS values
-      ansible.builtin.assert:
-        that:
-          - neighbor.remote_as == hostvars[neighbor.name].asn
-        fail_msg: >-
-          {{ inventory_hostname }} has incorrect remote AS for
-          {{ neighbor.name }}.
-        success_msg: >-
-          {{ inventory_hostname }} remote AS for
-          {{ neighbor.name }} is correct.
-      loop: "{{ bgp_neighbors }}"
-      loop_control:
-        loop_var: neighbor
+            {{ inventory_hostname }} underlay topology data is valid.
 
 - name: Validate fabric addressing
   hosts: localhost

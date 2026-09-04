@@ -15,6 +15,6 @@ interface {{ interface.name }}
 
 router bgp {{ asn }}
  bgp router-id {{ loopback_ip }}
-{% for neighbor in bgp_neighbors | default([]) %}
- neighbor {{ neighbor.ip }} remote-as {{ neighbor.remote_as }}
+{% for interface in underlay_interfaces | default([]) %}
+ neighbor {{ interface.peer_ip }} remote-as {{ hostvars[interface.peer].asn }}
 {% endfor %}

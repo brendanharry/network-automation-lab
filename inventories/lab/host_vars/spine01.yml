@@ -6,16 +6,9 @@ underlay_interfaces:
   - name: swp1
     peer: leaf01
     ip: 10.0.0.0/31
+    peer_ip: 10.0.0.1
 
   - name: swp2
     peer: leaf02
     ip: 10.0.0.4/31
-
-bgp_neighbors:
-  - name: leaf01
-    ip: 10.0.0.1
-    remote_as: 65101
-
-  - name: leaf02
-    ip: 10.0.0.5
-    remote_as: 65102
+    peer_ip: 10.0.0.5

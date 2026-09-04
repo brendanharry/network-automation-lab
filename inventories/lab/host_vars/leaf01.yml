@@ -6,16 +6,9 @@ underlay_interfaces:
   - name: swp1
     peer: spine01
     ip: 10.0.0.1/31
+    peer_ip: 10.0.0.0
 
   - name: swp2
     peer: spine02
     ip: 10.0.0.3/31
-
-bgp_neighbors:
-  - name: spine01
-    ip: 10.0.0.0
-    remote_as: 65001
-
-  - name: spine02
-    ip: 10.0.0.2
-    remote_as: 65002
+    peer_ip: 10.0.0.2
