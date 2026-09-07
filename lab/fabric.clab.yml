@@ -10,6 +10,7 @@ topology:
       binds:
         - ../configs/leaf01.cfg:/etc/frr/frr.conf
         - frr/daemons:/etc/frr/daemons
+        - frr/vtysh.conf:/etc/frr/vtysh.conf
 
     leaf02:
       kind: linux
@@ -17,6 +18,7 @@ topology:
       binds:
         - ../configs/leaf02.cfg:/etc/frr/frr.conf
         - frr/daemons:/etc/frr/daemons
+        - frr/vtysh.conf:/etc/frr/vtysh.conf
 
     spine01:
       kind: linux
@@ -24,6 +26,7 @@ topology:
       binds:
         - ../configs/spine01.cfg:/etc/frr/frr.conf
         - frr/daemons:/etc/frr/daemons
+        - frr/vtysh.conf:/etc/frr/vtysh.conf
 
     spine02:
       kind: linux
@@ -31,6 +34,7 @@ topology:
       binds:
         - ../configs/spine02.cfg:/etc/frr/frr.conf
         - frr/daemons:/etc/frr/daemons
+        - frr/vtysh.conf:/etc/frr/vtysh.conf
 
   links:
     - endpoints: ["leaf01:swp1", "spine01:swp1"]
