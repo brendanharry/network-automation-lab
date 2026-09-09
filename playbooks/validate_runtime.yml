@@ -1,0 +1,111 @@
+---
+- name: Validate running fabric
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    fabric_nodes:
+      - leaf01
+      - leaf02
+      - spine01
+      - spine02
+
+    connectivity_tests:
+      - source: leaf01
+        source_ip: 10.255.0.11
+        destination_ip: 10.255.0.12
+
+      - source: leaf02
+        source_ip: 10.255.0.12
+        destination_ip: 10.255.0.11
+
+      - source: spine01
+        source_ip: 10.255.0.21
+        destination_ip: 10.255.0.22
+
+      - source: spine02
+        source_ip: 10.255.0.22
+        destination_ip: 10.255.0.21
+
+  tasks:
+    - name: Count established BGP sessions
+      ansible.builtin.shell: >-
+        docker exec clab-fabric-{{ item }}
+        vtysh -c "show bgp neighbors"
+        | grep -c "BGP state = Established"
+      args:
+        executable: /bin/bash
+      loop: "{{ fabric_nodes }}"
+      register: bgp_session_counts
+      changed_when: false
+      failed_when: false
+
+    - name: Verify two BGP sessions are established
+      ansible.builtin.assert:
+        that:
+          - item.stdout | int == 2
+        fail_msg: >-
+          {{ item.item }} does not have two established BGP sessions.
+        success_msg: >-
+          {{ item.item }} has two established BGP sessions.
+      loop: "{{ bgp_session_counts.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Count loopback routes in BGP table
+      ansible.builtin.shell: >-
+        docker exec clab-fabric-{{ item }}
+        vtysh -c "show bgp ipv4 unicast"
+        | grep -Ec '10\.255\.0\.(11|12|21|22)/32'
+      args:
+        executable: /bin/bash
+      loop: "{{ fabric_nodes }}"
+      register: bgp_loopback_counts
+      changed_when: false
+      failed_when: false
+
+    - name: Verify all loopback routes are present
+      ansible.builtin.assert:
+        that:
+          - item.stdout | int == 4
+        fail_msg: >-
+          {{ item.item }} does not have all four loopback routes.
+        success_msg: >-
+          {{ item.item }} has all four loopback routes.
+      loop: "{{ bgp_loopback_counts.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Test loopback reachability
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "clab-fabric-{{ item.source }}"
+          - ping
+          - -I
+          - "{{ item.source_ip }}"
+          - -c
+          - "2"
+          - "{{ item.destination_ip }}"
+      loop: "{{ connectivity_tests }}"
+      register: ping_results
+      changed_when: false
+      failed_when: false
+      loop_control:
+        label: "{{ item.source }} to {{ item.destination_ip }}"
+
+    - name: Verify loopback reachability
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+        fail_msg: >-
+          {{ item.item.source }} cannot reach
+          {{ item.item.destination_ip }}.
+        success_msg: >-
+          {{ item.item.source }} can reach
+          {{ item.item.destination_ip }}.
+      loop: "{{ ping_results.results }}"
+      loop_control:
+        label: >-
+          {{ item.item.source }} to {{ item.item.destination_ip }}
