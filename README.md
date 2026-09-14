@@ -53,6 +53,7 @@ Containerlab / Docker
 Running four-node fabric
         ↓
 Automated runtime validation
+```
 
 ## Validation
 
@@ -73,6 +74,44 @@ After the virtual fabric is deployed, Ansible verifies:
 - Two BGP sessions are established on each router
 - All four loopback prefixes are present in each BGP table
 - End-to-end loopback reachability succeeds
+
+## Prerequisites
+
+- Python 3 with virtual environment support
+- Ansible installed in the project's `.venv`
+- Docker installed and running
+- Containerlab installed with permission to deploy and destroy labs
+- GNU Make
+
+Activate the project's `.venv` before running the workflow so the expected
+Python/Ansible environment is used.
+Your user must be able to run Docker commands.
+
+## Setup
+
+1. Clone the repository and open its directory (or open your existing checkout):
+
+   ```bash
+   git clone https://github.com/brendanharry/network-automation-lab.git
+   cd network-automation-lab
+   ```
+
+2. Create `.venv` if needed, activate it, and install the project Python tools:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   python -m pip install ansible yamllint
+   ```
+
+3. Verify the required tools from the activated environment:
+
+   ```bash
+   python --version
+   ansible-playbook --version
+   docker info
+   containerlab version
+   make --version
+   ```
 
 ## Running the Lab
 
@@ -108,13 +147,32 @@ Destroy the lab:
 make destroy
 ```
 
-Run the complete workflow end-to-end:
+## Verification
+
+Run the complete workflow end-to-end from the activated `.venv`:
 
 ```bash
 make verify
 ```
 
-`make verify` performs configuration generation, topology validation, lab deployment, runtime testing, and clean teardown.
+`make verify` generates FRR configurations, validates the topology data,
+deploys the fabric with Containerlab, and runs live BGP session, loopback route,
+and ping validation. After a successful run, it destroys the lab. If a validation
+stage fails, Make stops and leaves the lab running so it can be troubleshot.
+
+### Expected Result
+
+A successful run ends with an Ansible recap showing `failed=0`, followed by
+Containerlab teardown. Example (abridged):
+
+```text
+PLAY RECAP
+localhost : ok=6 changed=0 unreachable=0 failed=0
+...
+Destroying lab: fabric
+...
+Successfully destroyed lab fabric
+```
 
 ## Technologies
 
