@@ -1,13 +1,17 @@
 ---
-name: YAML Lint
+name: Network Automation CI
 
 "on":
   pull_request:
     branches:
       - main
+  push:
+    branches:
+      - main
 
 jobs:
-  yaml-lint:
+jobs:
+   validation:
     runs-on: ubuntu-latest
 
     steps:
@@ -30,8 +34,31 @@ jobs:
           playbooks/build_configs.yml
           --syntax-check
 
+      - name: Check runtime validation syntax
+        run: >-
+          ansible-playbook
+          -i inventories/lab/hosts.yml
+          playbooks/validate_runtime.yml
+          --syntax-check
+
       - name: Run topology validation
         run: >-
           ansible-playbook
           -i inventories/lab/hosts.yml
           playbooks/validate_topology.yml
+
+      - name: Generate device configurations
+        run: >-
+          ansible-playbook
+          -i inventories/lab/hosts.yml
+          playbooks/build_configs.yml
+
+      - name: Check generated configurations are committed
+        run: |
+          git diff --exit-code -- configs/
+          config_status=$(git status --porcelain -uall -- configs/)
+          if [ -n "$config_status" ]; then
+            echo "Generated configs differ from Git. Regenerate and commit."
+            git status --short --untracked-files=all -- configs/
+            exit 1
+          fi
