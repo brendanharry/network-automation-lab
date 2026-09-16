@@ -10,8 +10,7 @@ name: Network Automation CI
       - main
 
 jobs:
-jobs:
-   validation:
+  validation:
     runs-on: ubuntu-latest
 
     steps:
