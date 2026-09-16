@@ -6,6 +6,11 @@
   connection: local
   gather_facts: false
 
+  vars:
+    fabric_hosts: "{{ groups['leafs'] + groups['spines'] }}"
+    ipv4_octet: '(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])'
+    ipv4_pattern: '{{ ipv4_octet }}(?:\.{{ ipv4_octet }}){3}'
+
   tasks:
     - name: Check fabric connectivity
       ansible.builtin.assert:
@@ -15,6 +20,79 @@
             {{ inventory_hostname }} must have exactly two underlay interfaces.
         success_msg: >-
             {{ inventory_hostname }} underlay topology data is valid.
+
+    - name: Check ASN is a positive integer
+      ansible.builtin.assert:
+        that:
+          - asn is defined
+          - asn is integer
+          - asn > 0
+        fail_msg: >-
+          {{ inventory_hostname }} must have a positive integer ASN.
+
+    - name: Check underlay interface names are unique within each device
+      ansible.builtin.assert:
+        that:
+          - >-
+            underlay_interfaces | map(attribute='name') | list | length ==
+            underlay_interfaces | map(attribute='name')
+            | unique(case_sensitive=true) | length
+        fail_msg: >-
+          {{ inventory_hostname }} has duplicate underlay interface names.
+
+    - name: Check underlay peers and IPv4 addressing format
+      ansible.builtin.assert:
+        that:
+          - item.peer in fabric_hosts
+          - item.ip is string
+          - item.ip is match('^' ~ ipv4_pattern ~ '/31$')
+          - item.peer_ip is string
+          - item.peer_ip is match('^' ~ ipv4_pattern ~ '$')
+        fail_msg: >-
+          {{ inventory_hostname }} interface {{ item.name }} must reference
+          a fabric peer and use an IPv4 /31 address and a bare IPv4 peer_ip.
+      loop: "{{ underlay_interfaces }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check local and peer addresses belong to the same /31 subnet
+      vars:
+        local_octets: >-
+          {{ item.ip.split('/')[0].split('.') | map('int') | list }}
+        peer_octets: "{{ item.peer_ip.split('.') | map('int') | list }}"
+      ansible.builtin.assert:
+        that:
+          - local_octets[:3] == peer_octets[:3]
+          # A /31 pairs adjacent addresses with the same last-octet quotient.
+          - local_octets[3] // 2 == peer_octets[3] // 2
+          - local_octets[3] != peer_octets[3]
+        fail_msg: >-
+          {{ inventory_hostname }} interface {{ item.name }} must use
+          distinct local and peer addresses in the same /31 subnet.
+      loop: "{{ underlay_interfaces }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check each underlay link has exactly one reciprocal definition
+      vars:
+        reciprocal_links: >-
+          {{
+            hostvars[item.peer].underlay_interfaces | default([])
+            | selectattr('peer', 'equalto', inventory_hostname)
+            | selectattr('ip', 'equalto', item.peer_ip ~ '/31')
+            | selectattr('peer_ip', 'equalto', item.ip.split('/')[0])
+            | list
+          }}
+      ansible.builtin.assert:
+        that:
+          - reciprocal_links | length == 1
+        fail_msg: >-
+          {{ inventory_hostname }} interface {{ item.name }} must have exactly
+          one reciprocal link on {{ item.peer }} pointing back to
+          {{ inventory_hostname }} with the local and peer addresses swapped.
+      loop: "{{ underlay_interfaces }}"
+      loop_control:
+        label: "{{ item.name }} -> {{ item.peer }}"
 
 - name: Validate fabric addressing
   hosts: localhost
