@@ -39,6 +39,11 @@
       register: bgp_session_counts
       changed_when: false
       failed_when: false
+      until: bgp_session_counts.stdout | int == 2
+      retries: 12
+      delay: 2
+      # Let the assertion below report failures after retries are exhausted.
+      ignore_errors: true
 
     - name: Verify two BGP sessions are established
       ansible.builtin.assert:
@@ -63,6 +68,11 @@
       register: bgp_loopback_counts
       changed_when: false
       failed_when: false
+      until: bgp_loopback_counts.stdout | int == 4
+      retries: 12
+      delay: 2
+      # Let the assertion below report failures after retries are exhausted.
+      ignore_errors: true
 
     - name: Verify all loopback routes are present
       ansible.builtin.assert:
@@ -87,6 +97,8 @@
           - "{{ item.source_ip }}"
           - -c
           - "2"
+          - -w
+          - "5"
           - "{{ item.destination_ip }}"
       loop: "{{ connectivity_tests }}"
       register: ping_results
