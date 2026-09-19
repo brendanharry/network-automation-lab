@@ -4,85 +4,205 @@
   gather_facts: false
 
   vars:
-    fabric_nodes:
-      - leaf01
-      - leaf02
-      - spine01
-      - spine02
-
-    connectivity_tests:
-      - source: leaf01
-        source_ip: 10.255.0.11
-        destination_ip: 10.255.0.12
-
-      - source: leaf02
-        source_ip: 10.255.0.12
-        destination_ip: 10.255.0.11
-
-      - source: spine01
-        source_ip: 10.255.0.21
-        destination_ip: 10.255.0.22
-
-      - source: spine02
-        source_ip: 10.255.0.22
-        destination_ip: 10.255.0.21
+    fabric_nodes: "{{ groups['leafs'] | union(groups['spines']) }}"
+    expected_loopback_prefixes: >-
+      {{ fabric_nodes
+         | map('extract', hostvars, 'loopback_ip')
+         | map('regex_replace', '$', '/32')
+         | list }}
+    connectivity_tests: >-
+      {{ (groups['leafs'] | permutations(2) | list)
+         + (groups['spines'] | permutations(2) | list) }}
 
   tasks:
-    - name: Count established BGP sessions
-      ansible.builtin.shell: >-
-        docker exec clab-fabric-{{ item }}
-        vtysh -c "show bgp neighbors"
-        | grep -c "BGP state = Established"
-      args:
-        executable: /bin/bash
+    - name: Read BGP neighbors as JSON
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "clab-fabric-{{ item }}"
+          - vtysh
+          - -c
+          - show bgp neighbors json
       loop: "{{ fabric_nodes }}"
-      register: bgp_session_counts
+      register: bgp_neighbor_results
       changed_when: false
       failed_when: false
-      until: bgp_session_counts.stdout | int == 2
+      until: >-
+        bgp_neighbor_results.rc == 0
+        and bgp_neighbor_results.stdout | trim | length > 0
+        and (bgp_neighbor_results.stdout | from_json) is mapping
+        and hostvars[item].underlay_interfaces
+        | map(attribute='peer_ip')
+        | difference(
+            bgp_neighbor_results.stdout
+            | from_json
+            | dict2items
+            | selectattr('value.bgpState', 'equalto', 'Established')
+            | map(attribute='key')
+            | list
+          )
+        | length == 0
       retries: 12
       delay: 2
-      # Let the assertion below report failures after retries are exhausted.
+      # Let the assertions below report failures after retries are exhausted.
       ignore_errors: true
 
-    - name: Verify two BGP sessions are established
+    - name: Verify the expected BGP neighbors and remote ASNs
       ansible.builtin.assert:
         that:
-          - item.stdout | int == 2
+          - item.rc == 0
+          - item.stdout | trim | length > 0
+          - (item.stdout | from_json) is mapping
+          - >-
+            hostvars[item.item].underlay_interfaces
+            | map(attribute='peer_ip')
+            | symmetric_difference((item.stdout | from_json).keys() | list)
+            | length == 0
+          - >-
+            hostvars[item.item].underlay_interfaces
+            | map(attribute='peer_ip')
+            | map('extract', item.stdout | from_json)
+            | map(attribute='bgpState')
+            | unique
+            | list == ['Established']
+          - >-
+            hostvars[item.item].underlay_interfaces
+            | map(attribute='peer_ip')
+            | map('extract', item.stdout | from_json)
+            | map(attribute='remoteAs')
+            | map('int')
+            | list
+            == hostvars[item.item].underlay_interfaces
+               | map(attribute='peer')
+               | map('extract', hostvars, 'asn')
+               | map('int')
+               | list
         fail_msg: >-
-          {{ item.item }} does not have two established BGP sessions.
+          {{ item.item }} does not have exactly the expected Established BGP
+          neighbors with inventory-defined remote ASNs.
+          Command rc={{ item.rc }};
+          stderr={{ item.stderr | default('') | trim | to_json }};
+          stdout={{ item.stdout | default('') | trim | to_json }}.
         success_msg: >-
-          {{ item.item }} has two established BGP sessions.
-      loop: "{{ bgp_session_counts.results }}"
+          {{ item.item }} has exactly the expected Established BGP neighbors
+          with inventory-defined remote ASNs.
+      loop: "{{ bgp_neighbor_results.results }}"
       loop_control:
         label: "{{ item.item }}"
 
-    - name: Count loopback routes in BGP table
-      ansible.builtin.shell: >-
-        docker exec clab-fabric-{{ item }}
-        vtysh -c "show bgp ipv4 unicast"
-        | grep -Ec '10\.255\.0\.(11|12|21|22)/32'
-      args:
-        executable: /bin/bash
+    - name: Read the IPv4 unicast BGP table as JSON
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "clab-fabric-{{ item }}"
+          - vtysh
+          - -c
+          - show bgp ipv4 unicast json
       loop: "{{ fabric_nodes }}"
-      register: bgp_loopback_counts
+      register: bgp_route_results
       changed_when: false
       failed_when: false
-      until: bgp_loopback_counts.stdout | int == 4
+      until: >-
+        bgp_route_results.rc == 0
+        and bgp_route_results.stdout | trim | length > 0
+        and (bgp_route_results.stdout | from_json) is mapping
+        and (bgp_route_results.stdout | from_json).routes is mapping
+        and expected_loopback_prefixes
+        | difference(
+            (bgp_route_results.stdout | from_json).routes.keys() | list
+          )
+        | length == 0
       retries: 12
       delay: 2
       # Let the assertion below report failures after retries are exhausted.
       ignore_errors: true
 
-    - name: Verify all loopback routes are present
+    - name: Verify every expected loopback is in the BGP table
       ansible.builtin.assert:
         that:
-          - item.stdout | int == 4
+          - item.rc == 0
+          - item.stdout | trim | length > 0
+          - (item.stdout | from_json) is mapping
+          - (item.stdout | from_json).routes is mapping
+          - >-
+            expected_loopback_prefixes
+            | difference((item.stdout | from_json).routes.keys() | list)
+            | length == 0
         fail_msg: >-
-          {{ item.item }} does not have all four loopback routes.
+          {{ item.item }} is missing one or more inventory-defined loopback
+          prefixes from its BGP table. Command rc={{ item.rc }};
+          stderr={{ item.stderr | default('') | trim | to_json }};
+          stdout={{ item.stdout | default('') | trim | to_json }}.
         success_msg: >-
-          {{ item.item }} has all four loopback routes.
-      loop: "{{ bgp_loopback_counts.results }}"
+          {{ item.item }} has every inventory-defined loopback prefix in its
+          BGP table.
+      loop: "{{ bgp_route_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Read BGP routes installed in the Linux routing table
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "clab-fabric-{{ item }}"
+          - ip
+          - -j
+          - -4
+          - route
+          - show
+          - protocol
+          - bgp
+      loop: "{{ fabric_nodes }}"
+      register: linux_route_results
+      changed_when: false
+      failed_when: false
+      until: >-
+        linux_route_results.rc == 0
+        and linux_route_results.stdout | trim | length > 0
+        and (linux_route_results.stdout | from_json) is sequence
+        and (linux_route_results.stdout | from_json) is not string
+        and fabric_nodes
+        | reject('equalto', item)
+        | map('extract', hostvars, 'loopback_ip')
+        | difference(
+            linux_route_results.stdout
+            | from_json
+            | map(attribute='dst')
+            | list
+          )
+        | length == 0
+      retries: 12
+      delay: 2
+      # Let the assertion below report failures after retries are exhausted.
+      ignore_errors: true
+
+    - name: Verify remote loopbacks are installed in the Linux routing table
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+          - item.stdout | trim | length > 0
+          - (item.stdout | from_json) is sequence
+          - (item.stdout | from_json) is not string
+          - >-
+            fabric_nodes
+            | reject('equalto', item.item)
+            | map('extract', hostvars, 'loopback_ip')
+            | difference(
+                item.stdout | from_json | map(attribute='dst') | list
+              )
+            | length == 0
+        fail_msg: >-
+          {{ item.item }} is missing one or more remote loopbacks from its
+          Linux BGP routing table. Command rc={{ item.rc }};
+          stderr={{ item.stderr | default('') | trim | to_json }};
+          stdout={{ item.stdout | default('') | trim | to_json }}.
+        success_msg: >-
+          {{ item.item }} has every remote loopback installed as a Linux BGP
+          route.
+      loop: "{{ linux_route_results.results }}"
       loop_control:
         label: "{{ item.item }}"
 
@@ -91,33 +211,34 @@
         argv:
           - docker
           - exec
-          - "clab-fabric-{{ item.source }}"
+          - "clab-fabric-{{ item.0 }}"
           - ping
           - -I
-          - "{{ item.source_ip }}"
+          - "{{ hostvars[item.0].loopback_ip }}"
           - -c
           - "2"
           - -w
           - "5"
-          - "{{ item.destination_ip }}"
+          - "{{ hostvars[item.1].loopback_ip }}"
       loop: "{{ connectivity_tests }}"
       register: ping_results
       changed_when: false
       failed_when: false
       loop_control:
-        label: "{{ item.source }} to {{ item.destination_ip }}"
+        label: >-
+          {{ item.0 }} to {{ hostvars[item.1].loopback_ip }}
 
     - name: Verify loopback reachability
       ansible.builtin.assert:
         that:
           - item.rc == 0
         fail_msg: >-
-          {{ item.item.source }} cannot reach
-          {{ item.item.destination_ip }}.
+          {{ item.item.0 }} cannot reach
+          {{ hostvars[item.item.1].loopback_ip }}.
         success_msg: >-
-          {{ item.item.source }} can reach
-          {{ item.item.destination_ip }}.
+          {{ item.item.0 }} can reach
+          {{ hostvars[item.item.1].loopback_ip }}.
       loop: "{{ ping_results.results }}"
       loop_control:
         label: >-
-          {{ item.item.source }} to {{ item.item.destination_ip }}
+          {{ item.item.0 }} to {{ hostvars[item.item.1].loopback_ip }}

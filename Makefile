@@ -10,7 +10,7 @@ deploy:
 	containerlab deploy -t lab/fabric.clab.yml --reconfigure
 
 test:
-	ansible-playbook playbooks/validate_runtime.yml
+	ansible-playbook -i inventories/lab/hosts.yml playbooks/validate_runtime.yml
 
 destroy:
 	containerlab destroy -t lab/fabric.clab.yml
