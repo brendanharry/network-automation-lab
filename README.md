@@ -77,8 +77,7 @@ After the virtual fabric is deployed, Ansible verifies:
 
 ## Prerequisites
 
-- Python 3 with virtual environment support
-- Ansible installed in the project's `.venv`
+- Python 3.12  with virtual environment support
 - Docker installed and running
 - Containerlab installed with permission to deploy and destroy labs
 - GNU Make
@@ -97,10 +96,11 @@ Your user must be able to run Docker commands.
    ```
 
 2. Create `.venv` if needed, activate it, and install the project Python tools:
+
    ```bash
-   python3 -m venv .venv
+   python3.12 -m venv .venv
    source .venv/bin/activate
-   python -m pip install ansible yamllint
+   python -m pip install -r requirements.txt
    ```
 
 3. Verify the required tools from the activated environment:
@@ -112,6 +112,21 @@ Your user must be able to run Docker commands.
    containerlab version
    make --version
    ```
+
+## Tested Environment
+
+The current dependency pins and workflow were tested with:
+
+- Ubuntu 24.04.1 LTS running under WSL2
+- Python 3.12.3
+- Ansible Core 2.21.3
+- yamllint 1.38.0
+- Docker 29.1.3
+- Containerlab 0.77.0
+- FRRouting container image `quay.io/frrouting/frr:10.7.0`
+
+Python dependencies are installed from `requirements.txt`. Docker and
+Containerlab remain host-level prerequisites and are not installed by pip.
 
 ## Running the Lab
 
@@ -198,6 +213,7 @@ Successfully destroyed lab fabric
 ├── playbooks/               Ansible automation and validation
 ├── templates/               Jinja2 configuration templates
 ├── Makefile                 Repeatable lab workflow
+├── requirements.txt         Pinned project Python tools
 └── README.md
 ```
 
