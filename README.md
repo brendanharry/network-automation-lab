@@ -1,6 +1,6 @@
 # Network Automation Lab
 
-A hands-on network automation project that builds and validates a four-node
+A reproducible network automation project that builds and validates a four-node
 leaf-spine eBGP fabric using Ansible, Jinja2, FRRouting, Containerlab, Docker,
 Git, and GitHub Actions.
 
@@ -11,7 +11,7 @@ network. Ansible and Jinja2 generate FRR router configurations, Containerlab
 deploys the virtual topology, and automated validation checks both the
 configuration data and the running network.
 
-The lab currently consists of:
+The lab consists of:
 
 - 2 leaf switches
 - 2 spine switches
@@ -36,6 +36,20 @@ The lab currently consists of:
               spine02
               AS 65002
 ```
+
+## Design Rationale
+
+The four-node topology is the smallest leaf-spine fabric that demonstrates
+redundant paths and consistent automation across both network roles. Each
+router has its own ASN to model a straightforward eBGP underlay, while /31
+prefixes avoid wasting addresses on point-to-point links. Stable /32 loopbacks
+provide router IDs and the endpoints used to validate routed reachability.
+
+The generated FRR configuration intentionally includes
+`no bgp ebgp-requires-policy` so this isolated lab can exchange routes without
+a production import/export policy framework. This is a lab simplification, not
+a recommendation for a production fabric, where explicit routing policy should
+be defined and reviewed.
 
 ## Automation Workflow
 
@@ -71,13 +85,15 @@ Ansible checks the source-of-truth data for issues such as:
 
 After the virtual fabric is deployed, Ansible verifies:
 
-- Two BGP sessions are established on each router
+- The exact inventory-defined BGP neighbors are established with the expected
+  remote ASNs
 - All four loopback prefixes are present in each BGP table
-- End-to-end loopback reachability succeeds
+- Remote loopbacks are installed in each router's Linux routing table
+- Loopback-sourced reachability succeeds between peer-role nodes
 
 ## Prerequisites
 
-- Python 3.12  with virtual environment support
+- Python 3.12 with virtual environment support
 - Docker installed and running
 - Containerlab installed with permission to deploy and destroy labs
 - GNU Make
@@ -130,7 +146,8 @@ Containerlab remain host-level prerequisites and are not installed by pip.
 
 ## Running the Lab
 
-A Makefile provides a simple workflow for building, validating, deploying, testing, and destroying the lab.
+A Makefile provides the build, validation, deployment, test, and cleanup
+workflow. Run `make help` for a summary of the available targets.
 
 Generate router configurations:
 
@@ -172,8 +189,10 @@ make verify
 
 `make verify` generates FRR configurations, validates the topology data,
 deploys the fabric with Containerlab, and runs live BGP session, loopback route,
-and ping validation. After a successful run, it destroys the lab. If a validation
-stage fails, Make stops and leaves the lab running so it can be troubleshot.
+Linux route, and connectivity validation. After a successful run, it destroys
+the lab. If an earlier stage fails, Make stops; if deployment has already
+occurred, the lab may remain running for inspection. Run `make destroy` after
+troubleshooting to clean it up.
 
 ### Expected Result
 
@@ -188,6 +207,38 @@ Destroying lab: fabric
 ...
 Successfully destroyed lab fabric
 ```
+
+## Troubleshooting
+
+Use `make validate` to isolate source-of-truth errors, `make deploy` to create
+or reconfigure the fabric, and `make test` to rerun runtime checks without
+rebuilding the lab. Useful first checks for a deployed fabric are:
+
+```bash
+docker ps
+containerlab inspect -t lab/fabric.clab.yml
+docker exec clab-fabric-leaf01 vtysh -c "show bgp summary"
+```
+
+The Ansible assertion output identifies the affected router and includes FRR
+JSON output for failed BGP checks. Use `make destroy` for manual cleanup when
+investigation is complete.
+
+## Generated Configurations
+
+Files under `configs/` are generated artifacts derived from the YAML inventory
+and `templates/bgp.j2`; they are committed so changes are reviewable. GitHub
+Actions regenerates them and fails if the result differs from the committed
+files. After changing inventory or templates, run `make build` and include the
+resulting configuration changes in the same commit.
+
+## v1.0 Scope
+
+This release deliberately focuses on an IPv4, eBGP-only underlay in a
+Containerlab/FRR environment. It does not include an EVPN/VXLAN overlay,
+production AAA or secrets handling, or production import/export policy. Runtime
+validation is purpose-built for this four-node topology rather than a generic
+fabric test framework.
 
 ## Technologies
 
@@ -216,7 +267,3 @@ Successfully destroyed lab fabric
 ├── requirements.txt         Pinned project Python tools
 └── README.md
 ```
-
-## Current Status
-
-The project can currently generate, validate, deploy, test, and destroy a four-node eBGP leaf-spine fabric using a repeatable automation workflow.
