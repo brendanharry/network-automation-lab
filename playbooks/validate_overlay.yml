@@ -1,0 +1,363 @@
+---
+- name: Exercise host learning and bidirectional tenant connectivity
+  hosts: test_hosts
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Announce host IP for dynamic MAC and IP learning
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "clab-fabric-{{ inventory_hostname }}"
+          - arping
+          - -U
+          - -c
+          - "3"
+          - -I
+          - "{{ attachment.interface }}"
+          - "{{ ip_address }}"
+      changed_when: false
+
+    - name: Ping the remote host through the tenant interface
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "clab-fabric-{{ inventory_hostname }}"
+          - ping
+          - -I
+          - "{{ attachment.interface }}"
+          - -c
+          - "3"
+          - -s
+          - "{{ tenant.mtu - 28 }}"
+          - -w
+          - "5"
+          - "{{ hostvars[item].ip_address }}"
+      loop: "{{ groups['test_hosts'] | difference([inventory_hostname]) }}"
+      register: tenant_ping
+      until: tenant_ping.rc == 0
+      retries: 12
+      delay: 2
+      changed_when: false
+
+- name: Validate EVPN control plane on every router
+  hosts:
+    - leafs
+    - spines
+  connection: local
+  gather_facts: false
+  vars:
+    # FRR 10.7 groups routes by RD, with nested path arrays per prefix.
+    route_paths: >-
+      {{ evpn_routes.stdout | from_json | dict2items
+         | selectattr('value', 'mapping') | map(attribute='value')
+         | map('dict2items') | flatten | selectattr('value', 'mapping')
+         | selectattr('value.paths', 'defined')
+         | map(attribute='value.paths') | flatten
+         | selectattr('valid', 'defined') | selectattr('valid')
+         | selectattr('bestpath', 'defined') | selectattr('bestpath') | list }}
+    expected_vteps: >-
+      {{ groups['leafs'] | map('extract', hostvars, 'vtep_source') | list }}
+    expected_host_ips: >-
+      {{ groups['test_hosts'] | map('extract', hostvars, 'ip_address') | list }}
+  tasks:
+    - name: Wait for the exact EVPN neighbors to establish
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "clab-fabric-{{ inventory_hostname }}"
+          - vtysh
+          - -c
+          - show bgp l2vpn evpn summary json
+      register: evpn_summary
+      changed_when: false
+      until: >-
+        evpn_summary.rc == 0
+        and (evpn_summary.stdout | from_json).peers is defined
+        and underlay_interfaces | map(attribute='peer_ip') | list
+        | symmetric_difference(
+            (evpn_summary.stdout | from_json).peers | dict2items
+            | selectattr('value.state', 'equalto', 'Established')
+            | map(attribute='key') | list) | length == 0
+      retries: 12
+      delay: 2
+
+    - name: Check EVPN peer ASNs
+      ansible.builtin.assert:
+        that:
+          - >-
+            (evpn_summary.stdout | from_json).peers[item.peer_ip].remoteAs
+            == hostvars[item.peer].asn
+      loop: "{{ underlay_interfaces }}"
+      loop_control:
+        label: "{{ item.peer }}"
+
+    - name: Wait for Type-3 membership and Type-2 host IP routes
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "clab-fabric-{{ inventory_hostname }}"
+          - vtysh
+          - -c
+          - show bgp l2vpn evpn route json
+      register: evpn_routes
+      changed_when: false
+      until: >-
+        evpn_routes.rc == 0
+        and expected_vteps | difference(
+          route_paths | selectattr('routeType', 'equalto', 3)
+          | map(attribute='ip') | list) | length == 0
+        and expected_host_ips | difference(
+          route_paths | selectattr('routeType', 'equalto', 2)
+          | selectattr('ip', 'defined') | map(attribute='ip') | list)
+          | length == 0
+      retries: 12
+      delay: 2
+
+    - name: Verify learned EVPN routes carry the shared route target
+      ansible.builtin.assert:
+        that:
+          - >-
+            ('RT:' ~ overlay_route_target)
+            in item.extendedCommunity.string.split()
+      loop: "{{ route_paths }}"
+      loop_control:
+        label: "Type-{{ item.routeType }} from {{ item.nexthops[0].ip }}"
+
+    - name: Verify Type-3 next hops remain the originating VTEPs
+      vars:
+        paths: >-
+          {{ route_paths | selectattr('routeType', 'equalto', 3)
+             | selectattr('ip', 'equalto', hostvars[item].vtep_source) | list }}
+      ansible.builtin.assert:
+        that:
+          - paths | length > 0
+          - >-
+            paths | map(attribute='nexthops') | flatten
+            | map(attribute='ip') | unique | list
+            == [hostvars[item].vtep_source]
+        success_msg: "IMET membership for {{ hostvars[item].vtep_source }}"
+      loop: "{{ groups['leafs'] }}"
+
+    - name: Verify each Type-2 MAC and IP binding and its originating VTEP
+      vars:
+        paths: >-
+          {{ route_paths | selectattr('routeType', 'equalto', 2)
+             | selectattr('ip', 'defined')
+             | selectattr('ip', 'equalto', hostvars[item].ip_address)
+             | selectattr('mac', 'equalto', hostvars[item].mac_address)
+             | list }}
+      ansible.builtin.assert:
+        that:
+          - paths | length > 0
+          - >-
+            paths | map(attribute='nexthops') | flatten
+            | map(attribute='ip') | unique | list
+            == [hostvars[hostvars[item].attachment.leaf].vtep_source]
+        success_msg: >-
+          {{ hostvars[item].mac_address }} / {{ hostvars[item].ip_address }}
+          via {{ hostvars[hostvars[item].attachment.leaf].vtep_source }}
+      loop: "{{ groups['test_hosts'] }}"
+
+    - name: Verify Phase 1 contains no Type-5 routes
+      ansible.builtin.assert:
+        that:
+          - route_paths | selectattr('routeType', 'equalto', 5) | length == 0
+
+- name: Verify spines exchange EVPN without local VNIs
+  hosts: spines
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Read spine VNI state
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "clab-fabric-{{ inventory_hostname }}"
+          - vtysh
+          - -c
+          - show evpn vni json
+      register: spine_vnis
+      changed_when: false
+
+    - name: Verify the spine has no local VNI
+      ansible.builtin.assert:
+        that:
+          - spine_vnis.stdout | from_json == {}
+
+- name: Validate leaf VXLAN and Linux state
+  hosts: leafs
+  connection: local
+  gather_facts: false
+  vars:
+    remote_leaf: >-
+      {{ groups['leafs'] | difference([inventory_hostname]) | first }}
+    remote_vtep: "{{ hostvars[remote_leaf].vtep_source }}"
+    local_host: >-
+      {{ groups['test_hosts'] | map('extract', hostvars)
+         | selectattr('attachment.leaf', 'equalto', inventory_hostname)
+         | first }}
+    remote_host: >-
+      {{ groups['test_hosts'] | map('extract', hostvars)
+         | selectattr('attachment.leaf', 'equalto', remote_leaf) | first }}
+  tasks:
+    - name: Wait for FRR to install remote VNI membership
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "clab-fabric-{{ inventory_hostname }}"
+          - vtysh
+          - -c
+          - "show evpn vni {{ tenant.vni }} json"
+      register: vni_state
+      changed_when: false
+      until: >-
+        vni_state.rc == 0
+        and (vni_state.stdout | from_json).remoteVteps is defined
+        and remote_vtep in ((vni_state.stdout | from_json).remoteVteps
+            | map(attribute='ip') | list)
+      retries: 12
+      delay: 2
+
+    - name: Verify the L2 VNI and bridge association
+      vars:
+        vni: "{{ vni_state.stdout | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - vni.vni == tenant.vni
+          - vni.type == 'L2'
+          - vni.vtepIp == vtep_source
+          - vni.bridge == overlay_bridge
+          - vni.vxlanInterface == overlay_vxlan
+          - vni.remoteVteps | map(attribute='ip') | list == [remote_vtep]
+
+    - name: Read Linux bridge and VXLAN attributes
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "clab-fabric-{{ inventory_hostname }}"
+          - ip
+          - -d
+          - -j
+          - link
+          - show
+      register: linux_links
+      changed_when: false
+
+    - name: Verify Linux forwarding and access port configuration
+      vars:
+        links: "{{ linux_links.stdout | from_json }}"
+        bridge: >-
+          {{ links | selectattr('ifname', 'equalto', overlay_bridge) | first }}
+        vxlan: >-
+          {{ links | selectattr('ifname', 'equalto', overlay_vxlan) | first }}
+        access: >-
+          {{ links | selectattr('ifname', 'equalto',
+              local_host.attachment.leaf_interface) | first }}
+      ansible.builtin.assert:
+        that:
+          - bridge.linkinfo.info_kind == 'bridge'
+          - bridge.linkinfo.info_data.vlan_filtering == 0
+          - "'UP' in bridge.flags"
+          - vxlan.linkinfo.info_kind == 'vxlan'
+          - vxlan.linkinfo.info_data.id == tenant.vni
+          - vxlan.linkinfo.info_data.local == vtep_source
+          - vxlan.linkinfo.info_data.port == 4789
+          - not vxlan.linkinfo.info_data.learning
+          - vxlan.linkinfo.info_data.remote is not defined
+          - vxlan.linkinfo.info_slave_data.learning == 0
+          - vxlan.master == overlay_bridge
+          - access.master == overlay_bridge
+          - vxlan.mtu == tenant.mtu and access.mtu == tenant.mtu
+          - "'UP' in vxlan.flags and 'UP' in access.flags"
+
+    - name: Wait for EVPN remote MAC installation
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "clab-fabric-{{ inventory_hostname }}"
+          - vtysh
+          - -c
+          - "show evpn mac vni {{ tenant.vni }} json"
+      register: mac_state
+      changed_when: false
+      until: >-
+        mac_state.rc == 0
+        and (mac_state.stdout | from_json).macs is defined
+        and remote_host.mac_address in (mac_state.stdout | from_json).macs
+        and (mac_state.stdout | from_json).macs[remote_host.mac_address].type
+            == 'remote'
+        and (mac_state.stdout | from_json).macs[
+            remote_host.mac_address].remoteVtep == remote_vtep
+      retries: 12
+      delay: 2
+
+    - name: Wait for externally learned remote Linux neighbor
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "clab-fabric-{{ inventory_hostname }}"
+          - ip
+          - -j
+          - neigh
+          - show
+          - dev
+          - "{{ overlay_bridge }}"
+      register: linux_neighbors
+      changed_when: false
+      until: >-
+        linux_neighbors.rc == 0
+        and linux_neighbors.stdout | from_json
+        | selectattr('dst', 'equalto', remote_host.ip_address)
+        | selectattr('lladdr', 'equalto', remote_host.mac_address)
+        | selectattr('extern_learn', 'defined') | list | length == 1
+      retries: 12
+      delay: 2
+
+    - name: Read tenant bridge addresses
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "clab-fabric-{{ inventory_hostname }}"
+          - ip
+          - -j
+          - address
+          - show
+          - dev
+          - "{{ overlay_bridge }}"
+      register: bridge_addresses
+      changed_when: false
+
+    - name: Verify the tenant bridge is unnumbered
+      ansible.builtin.assert:
+        that:
+          - (bridge_addresses.stdout | from_json | first).addr_info == []
+
+    - name: Read bridge forwarding and dynamic ARP learning settings
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "clab-fabric-{{ inventory_hostname }}"
+          - sysctl
+          - -n
+          - "net.ipv4.conf.{{ overlay_bridge }}.forwarding"
+          - "net.ipv6.conf.{{ overlay_bridge }}.forwarding"
+          - "net.ipv4.conf.{{ overlay_bridge }}.arp_accept"
+      register: bridge_settings
+      changed_when: false
+
+    - name: Verify routing is disabled and dynamic ARP learning is enabled
+      ansible.builtin.assert:
+        that:
+          - bridge_settings.stdout_lines == ['0', '0', '1']

@@ -12,3 +12,13 @@
         src: ../templates/bgp.j2
         dest: "{{ playbook_dir }}/../configs/{{ inventory_hostname }}.cfg"
         mode: "0644"
+
+- name: Generate Containerlab topology
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Render topology from the same inventory
+      ansible.builtin.template:
+        src: ../templates/fabric.clab.j2
+        dest: "{{ playbook_dir }}/../lab/fabric.clab.yml"
+        mode: "0644"

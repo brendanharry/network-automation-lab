@@ -1,0 +1,13 @@
+---
+tenant:
+  vlan: 10
+  vni: 10100
+  subnet: 192.168.10.0/24
+  mtu: 1500
+# A shared RT is required across the different leaf ASNs.
+# This is an RT namespace, not another BGP ASN.
+evpn_rt_admin: 65000
+overlay_route_target: "{{ evpn_rt_admin }}:{{ tenant.vni }}"
+overlay_bridge: "br{{ tenant.vlan }}"
+overlay_vxlan: "vxlan{{ tenant.vni }}"
+host_image: alpine:3.22.5

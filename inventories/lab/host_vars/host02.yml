@@ -1,0 +1,7 @@
+---
+attachment:
+  leaf: leaf02
+  leaf_interface: swp3
+  interface: eth1
+ip_address: 192.168.10.12
+mac_address: "02:00:00:00:10:02"

@@ -130,3 +130,78 @@
           - underlay_ips | length == underlay_ips | unique | length
         fail_msg: "Duplicate underlay IP addresses detected."
         success_msg: "All underlay IP addresses are unique."
+
+- name: Validate Phase 1 tenant and host attachments
+  hosts: localhost
+  gather_facts: false
+  vars:
+    ipv4_octet: '(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])'
+  tasks:
+    - name: Check the RT administrator fits the two-octet ASN encoding
+      ansible.builtin.assert:
+        that:
+          - evpn_rt_admin is integer
+          - evpn_rt_admin >= 0 and evpn_rt_admin <= 65535
+        fail_msg: EVPN RT administrator must be a 16-bit integer.
+
+    - name: Check the single L2 segment
+      ansible.builtin.assert:
+        that:
+          - tenant.vlan is integer
+          - tenant.vlan >= 1 and tenant.vlan <= 4094
+          - tenant.vni is integer
+          - tenant.vni >= 1 and tenant.vni <= 16777215
+          - tenant.mtu is integer
+          - tenant.mtu >= 1280 and tenant.mtu <= 9000
+          - >-
+            tenant.subnet is match(
+              '^' ~ ipv4_octet ~ '\.' ~ ipv4_octet ~ '\.'
+              ~ ipv4_octet ~ '\.0/24$')
+          - groups['test_hosts'] | length == 2
+        fail_msg: >-
+          Phase 1 requires one valid VLAN/VNI, a /24, and two test hosts.
+
+    - name: Check VTEP addresses reuse leaf loopbacks
+      ansible.builtin.assert:
+        that:
+          - hostvars[item].vtep_source == hostvars[item].loopback_ip
+          - >-
+            hostvars[item].vtep_source is match(
+              '^' ~ ipv4_octet ~ '(\.' ~ ipv4_octet ~ '){3}$')
+      loop: "{{ groups['leafs'] }}"
+
+    - name: Check host attachment and addressing
+      vars:
+        host: "{{ hostvars[item] }}"
+      ansible.builtin.assert:
+        that:
+          - host.attachment.leaf in groups['leafs']
+          - host.attachment.leaf_interface is match('^swp[0-9]+$')
+          - host.attachment.leaf_interface | length <= 15
+          - >-
+            host.attachment.leaf_interface not in
+            (hostvars[host.attachment.leaf].underlay_interfaces
+             | map(attribute='name') | list)
+          - host.attachment.interface is match('^eth[1-9][0-9]*$')
+          - host.attachment.interface | length <= 15
+          - >-
+            host.ip_address is match(
+              '^' ~ ipv4_octet ~ '(\.' ~ ipv4_octet ~ '){3}$')
+          - >-
+            host.ip_address.split('.')[:3]
+            == tenant.subnet.split('/')[0].split('.')[:3]
+          - host.ip_address.split('.')[3] | int > 0
+          - host.ip_address.split('.')[3] | int < 255
+          - host.mac_address is match('^02(:[0-9a-f]{2}){5}$')
+      loop: "{{ groups['test_hosts'] }}"
+
+    - name: Check host identities are unique and cover both leaves
+      vars:
+        hosts: "{{ groups['test_hosts'] | map('extract', hostvars) | list }}"
+      ansible.builtin.assert:
+        that:
+          - hosts | map(attribute='ip_address') | unique | length == 2
+          - hosts | map(attribute='mac_address') | unique | length == 2
+          - >-
+            hosts | map(attribute='attachment.leaf') | list
+            | symmetric_difference(groups['leafs']) | length == 0

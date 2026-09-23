@@ -1,0 +1,116 @@
+---
+- name: Configure leaf Linux bridges and VXLAN interfaces
+  hosts: leafs
+  connection: local
+  gather_facts: false
+  vars:
+    container: "clab-fabric-{{ inventory_hostname }}"
+  tasks:
+    - name: Read existing Linux interfaces
+      ansible.builtin.command:
+        argv: [docker, exec, "{{ container }}", ip, -j, link, show]
+      register: existing_links
+      changed_when: false
+
+    - name: Create the tenant bridge if absent
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ container }}"
+          - ip
+          - link
+          - add
+          - "{{ overlay_bridge }}"
+          - type
+          - bridge
+          - stp_state
+          - "0"
+          - vlan_filtering
+          - "0"
+      when: >-
+        overlay_bridge not in
+        (existing_links.stdout | from_json | map(attribute='ifname') | list)
+      changed_when: true
+
+    - name: Create the tenant VXLAN interface if absent
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ container }}"
+          - ip
+          - link
+          - add
+          - "{{ overlay_vxlan }}"
+          - type
+          - vxlan
+          - id
+          - "{{ tenant.vni }}"
+          - local
+          - "{{ vtep_source }}"
+          - dstport
+          - "4789"
+          - nolearning
+      when: >-
+        overlay_vxlan not in
+        (existing_links.stdout | from_json | map(attribute='ifname') | list)
+      changed_when: true
+
+    - name: Configure bridge and VXLAN state
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'exec', container] + item }}"
+      loop:
+        - [ip, link, set, "{{ overlay_bridge }}", addrgenmode, none,
+           mtu, "{{ tenant.mtu }}", up]
+        - [ip, link, set, "{{ overlay_vxlan }}", master,
+           "{{ overlay_bridge }}", addrgenmode, none,
+           mtu, "{{ tenant.mtu }}", up]
+        - [ip, link, set, "{{ overlay_vxlan }}", type, bridge_slave,
+           learning, 'off', neigh_suppress, 'on']
+        # An unnumbered bridge can learn host IP/MAC bindings from gratuitous
+        # ARP. Zebra then advertises these dynamically learned Type-2 bindings.
+        - [sysctl, -w, "net.ipv4.conf.{{ overlay_bridge }}.arp_accept=1"]
+        - [sysctl, -w, "net.ipv4.conf.{{ overlay_bridge }}.forwarding=0"]
+        - [sysctl, -w, "net.ipv6.conf.{{ overlay_bridge }}.forwarding=0"]
+        - [sysctl, -w, "net.ipv6.conf.{{ overlay_bridge }}.disable_ipv6=1"]
+        - [sysctl, -w, "net.ipv6.conf.{{ overlay_vxlan }}.disable_ipv6=1"]
+      changed_when: true
+
+    - name: Attach untagged host ports to the tenant bridge
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ container }}"
+          - ip
+          - link
+          - set
+          - "{{ hostvars[item].attachment.leaf_interface }}"
+          - master
+          - "{{ overlay_bridge }}"
+          - addrgenmode
+          - none
+          - mtu
+          - "{{ tenant.mtu }}"
+          - up
+      loop: "{{ groups['test_hosts'] }}"
+      when: hostvars[item].attachment.leaf == inventory_hostname
+      changed_when: true
+
+- name: Configure test host interfaces
+  hosts: test_hosts
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Configure deterministic host MAC and IP addresses
+      ansible.builtin.command:
+        argv: >-
+          {{ ['docker', 'exec', 'clab-fabric-' + inventory_hostname] + item }}
+      loop:
+        - [ip, link, set, "{{ attachment.interface }}", address,
+           "{{ mac_address }}", mtu, "{{ tenant.mtu }}", up]
+        - [ip, address, replace,
+           "{{ ip_address }}/{{ tenant.subnet.split('/')[1] }}",
+           dev, "{{ attachment.interface }}"]
+      changed_when: true
