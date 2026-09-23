@@ -20,3 +20,18 @@ router bgp {{ asn }}
 {% for interface in underlay_interfaces | default([]) %}
  neighbor {{ interface.peer_ip }} remote-as {{ hostvars[interface.peer].asn }}
 {% endfor %}
+ address-family l2vpn evpn
+{% for interface in underlay_interfaces %}
+  neighbor {{ interface.peer_ip }} activate
+{% if role == 'spine' %}
+  neighbor {{ interface.peer_ip }} attribute-unchanged next-hop
+{% endif %}
+{% endfor %}
+{% if role == 'leaf' %}
+  advertise-all-vni
+  vni {{ tenant.vni }}
+   route-target import {{ overlay_route_target }}
+   route-target export {{ overlay_route_target }}
+  exit-vni
+{% endif %}
+ exit-address-family

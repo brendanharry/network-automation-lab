@@ -55,10 +55,12 @@ jobs:
 
       - name: Check generated configurations are committed
         run: |
-          git diff --exit-code -- configs/
-          config_status=$(git status --porcelain -uall -- configs/)
+          git diff --exit-code -- configs/ lab/fabric.clab.yml
+          config_status=$(git status --porcelain -uall -- \
+            configs/ lab/fabric.clab.yml)
           if [ -n "$config_status" ]; then
             echo "Generated configs differ from Git. Regenerate and commit."
-            git status --short --untracked-files=all -- configs/
+            git status --short --untracked-files=all -- \
+              configs/ lab/fabric.clab.yml
             exit 1
           fi

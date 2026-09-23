@@ -1,2 +1,3 @@
 ---
 role: leaf
+vtep_source: "{{ loopback_ip }}"
