@@ -118,15 +118,81 @@
       retries: 12
       delay: 2
 
-    - name: Verify learned EVPN routes carry the shared route target
+    - name: Verify each host route carries its segment RT
+      vars:
+        host_segment: >-
+          {{ segments | selectattr('name', 'equalto', hostvars[item].segment)
+             | first }}
+        paths: >-
+          {{ route_paths | selectattr('routeType', 'equalto', 2)
+             | selectattr('ip', 'defined')
+             | selectattr('ip', 'equalto', hostvars[item].ip_address) | list }}
       ansible.builtin.assert:
         that:
+          - paths | length > 0
           - >-
-            ('RT:' ~ overlay_route_target)
-            in item.extendedCommunity.string.split()
-      loop: "{{ route_paths }}"
+            paths | map(attribute='extendedCommunity.string')
+            | map('regex_search', 'RT:' ~ evpn_rt_admin ~ ':' ~ host_segment.vni
+                  ~ '(?: |$)') | select('equalto', none) | length == 0
+      loop: "{{ groups['test_hosts'] }}"
+
+    - name: Wait for genuine Type-5 prefixes from each participating VTEP
+      vars:
+        prefix_paths: >-
+          {{ evpn_prefix_result.stdout | from_json | dict2items
+             | selectattr('value', 'mapping') | map(attribute='value')
+             | map('dict2items') | flatten | selectattr('value', 'mapping')
+             | selectattr('value.paths', 'defined')
+             | map(attribute='value.paths') | flatten
+             | selectattr('valid', 'defined') | selectattr('valid')
+             | selectattr('bestpath', 'defined') | selectattr('bestpath')
+             | selectattr('routeType', 'equalto', 5)
+             | selectattr('ip', 'equalto', item.0.subnet.split('/')[0])
+             | selectattr('ipLen', 'equalto', item.0.subnet.split('/')[1] | int)
+             | list }}
+      ansible.builtin.command:
+        argv: [docker, exec, "clab-fabric-{{ inventory_hostname }}", vtysh, -c,
+               show bgp l2vpn evpn route json]
+      register: evpn_prefix_result
+      changed_when: false
+      until: >-
+        prefix_paths | map(attribute='nexthops') | flatten
+        | selectattr('ip', 'equalto', hostvars[item.1].vtep_source)
+        | list | length > 0
+      retries: 12
+      delay: 2
+      loop: "{{ segments | subelements('leaves') }}"
       loop_control:
-        label: "Type-{{ item.routeType }} from {{ item.nexthops[0].ip }}"
+        label: "{{ item.0.subnet }} via {{ hostvars[item.1].vtep_source }}"
+
+    - name: Retain converged EVPN state for route assertions
+      ansible.builtin.set_fact:
+        evpn_routes: "{{ evpn_prefix_result.results | last }}"
+
+    - name: Verify Type-5 L3 RT and originating router MAC
+      vars:
+        prefix_paths: >-
+          {{ route_paths | selectattr('routeType', 'equalto', 5)
+             | selectattr('ip', 'equalto', item.0.subnet.split('/')[0])
+             | selectattr('ipLen', 'equalto', item.0.subnet.split('/')[1] | int)
+             | list }}
+        matching_paths: >-
+          {{ prefix_paths | selectattr('extendedCommunity.string', 'search',
+               'Rmac:' ~ hostvars[item.1].router_mac) | list }}
+      ansible.builtin.assert:
+        that:
+          - matching_paths | length > 0
+          - >-
+            matching_paths | map(attribute='nexthops') | flatten
+            | map(attribute='ip') | unique
+            | list == [hostvars[item.1].vtep_source]
+          - >-
+            matching_paths | map(attribute='extendedCommunity.string')
+            | map('regex_search', 'RT:' ~ l3_route_target ~ '(?: |$)')
+            | select('equalto', none) | length == 0
+        success_msg: >-
+          Type-5 {{ item.0.subnet }} via {{ hostvars[item.1].vtep_source }}
+      loop: "{{ segments | subelements('leaves') }}"
 
     - name: Verify Type-3 next hops remain the originating VTEPs
       vars:
@@ -142,6 +208,23 @@
             == [hostvars[item].vtep_source]
         success_msg: "IMET membership for {{ hostvars[item].vtep_source }}"
       loop: "{{ groups['leafs'] }}"
+
+    - name: Verify Type-3 membership for every segment and originating leaf
+      vars:
+        paths: >-
+          {{ route_paths | selectattr('routeType', 'equalto', 3)
+             | selectattr('ip', 'equalto', hostvars[item.1].vtep_source)
+             | selectattr('extendedCommunity.string', 'search',
+                 'RT:' ~ evpn_rt_admin ~ ':' ~ item.0.vni ~ '(?: |$)')
+             | list }}
+      ansible.builtin.assert:
+        that:
+          - paths | length > 0
+          - >-
+            paths | map(attribute='nexthops') | flatten
+            | map(attribute='ip') | unique
+            | list == [hostvars[item.1].vtep_source]
+      loop: "{{ segments | subelements('leaves') }}"
 
     - name: Verify each Type-2 MAC and IP binding and its originating VTEP
       vars:
@@ -163,10 +246,6 @@
           via {{ hostvars[hostvars[item].attachment.leaf].vtep_source }}
       loop: "{{ groups['test_hosts'] }}"
 
-    - name: Verify Phase 1 contains no Type-5 routes
-      ansible.builtin.assert:
-        that:
-          - route_paths | selectattr('routeType', 'equalto', 5) | length == 0
 
 - name: Verify spines exchange EVPN without local VNIs
   hosts: spines
@@ -195,6 +274,11 @@
   connection: local
   gather_facts: false
   vars:
+    # Preserve all original VLAN 10 checks on both leaves.
+    phase1_segment: >-
+      {{ segments | selectattr('name', 'equalto', 'vlan10') | first }}
+    overlay_bridge: "br{{ phase1_segment.vlan }}"
+    overlay_vxlan: "vxlan{{ phase1_segment.vni }}"
     remote_leaf: >-
       {{ groups['leafs'] | difference([inventory_hostname]) | first }}
     remote_vtep: "{{ hostvars[remote_leaf].vtep_source }}"
@@ -214,7 +298,7 @@
           - "clab-fabric-{{ inventory_hostname }}"
           - vtysh
           - -c
-          - "show evpn vni {{ tenant.vni }} json"
+          - "show evpn vni {{ phase1_segment.vni }} json"
       register: vni_state
       changed_when: false
       until: >-
@@ -230,7 +314,7 @@
         vni: "{{ vni_state.stdout | from_json }}"
       ansible.builtin.assert:
         that:
-          - vni.vni == tenant.vni
+          - vni.vni == phase1_segment.vni
           - vni.type == 'L2'
           - vni.vtepIp == vtep_source
           - vni.bridge == overlay_bridge
@@ -267,7 +351,7 @@
           - bridge.linkinfo.info_data.vlan_filtering == 0
           - "'UP' in bridge.flags"
           - vxlan.linkinfo.info_kind == 'vxlan'
-          - vxlan.linkinfo.info_data.id == tenant.vni
+          - vxlan.linkinfo.info_data.id == phase1_segment.vni
           - vxlan.linkinfo.info_data.local == vtep_source
           - vxlan.linkinfo.info_data.port == 4789
           - not vxlan.linkinfo.info_data.learning
@@ -286,7 +370,7 @@
           - "clab-fabric-{{ inventory_hostname }}"
           - vtysh
           - -c
-          - "show evpn mac vni {{ tenant.vni }} json"
+          - "show evpn mac vni {{ phase1_segment.vni }} json"
       register: mac_state
       changed_when: false
       until: >-
@@ -338,10 +422,13 @@
       register: bridge_addresses
       changed_when: false
 
-    - name: Verify the tenant bridge is unnumbered
+    - name: Verify the tenant bridge has its distributed gateway
       ansible.builtin.assert:
         that:
-          - (bridge_addresses.stdout | from_json | first).addr_info == []
+          - >-
+            (bridge_addresses.stdout | from_json | first).addr_info
+            | selectattr('family', 'equalto', 'inet') | map(attribute='local')
+            | list == [phase1_segment.gateway.split('/')[0]]
 
     - name: Read bridge forwarding and dynamic ARP learning settings
       ansible.builtin.command:
@@ -357,7 +444,7 @@
       register: bridge_settings
       changed_when: false
 
-    - name: Verify routing is disabled and dynamic ARP learning is enabled
+    - name: Verify tenant routing and dynamic ARP learning are enabled
       ansible.builtin.assert:
         that:
-          - bridge_settings.stdout_lines == ['0', '0', '1']
+          - bridge_settings.stdout_lines == ['1', '0', '1']

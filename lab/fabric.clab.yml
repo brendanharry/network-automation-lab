@@ -46,6 +46,11 @@ topology:
       image: alpine:3.22.5
       cmd: sleep infinity
 
+    host03:
+      kind: linux
+      image: alpine:3.22.5
+      cmd: sleep infinity
+
   links:
     - endpoints: ["leaf01:swp1", "spine01:swp1"]
     - endpoints: ["leaf01:swp2", "spine02:swp1"]
@@ -53,3 +58,4 @@ topology:
     - endpoints: ["leaf02:swp2", "spine02:swp2"]
     - endpoints: ["leaf01:swp3", "host01:eth1"]
     - endpoints: ["leaf02:swp3", "host02:eth1"]
+    - endpoints: ["leaf02:swp4", "host03:eth1"]

@@ -1,7 +1,7 @@
 # Network Automation Lab
 
 A reproducible network automation project that builds and validates a four-router
-leaf-spine eBGP fabric with a Layer-2 EVPN/VXLAN overlay using Ansible, Jinja2,
+leaf-spine eBGP fabric with Layer-2 and routed EVPN/VXLAN overlays using Ansible, Jinja2,
 FRRouting, Containerlab, Docker, Git, and GitHub Actions.
 
 ## Project Overview
@@ -18,8 +18,8 @@ The lab consists of:
 - eBGP underlay routing
 - /31 point-to-point links
 - /32 loopback advertisements
-- Two Linux test hosts on VLAN 10 / VNI 10100
-- EVPN Type-2 host bindings and Type-3 VTEP membership
+- Three Linux test hosts across VLANs 10 and 20
+- EVPN Type-2 host bindings, Type-3 membership, and Type-5 prefixes
 - Automated topology validation
 - Automated BGP and reachability testing
 - GitHub-based change control and CI
@@ -66,7 +66,7 @@ Generated FRR configurations and Containerlab topology
         ↓
 Containerlab / Docker
         ↓
-Running four-router fabric with two test hosts
+Running four-router fabric with three test hosts
         ↓
 Automated runtime validation
 ```
@@ -97,7 +97,10 @@ After the virtual fabric is deployed, Ansible verifies:
 - EVPN neighbors establish and Type-3 routes retain the leaf VTEP next hops
 - Type-2 MAC/IP bindings exist for both hosts on every router
 - Leaf VNI, bridge, access port and externally learned neighbor state is correct
-- Both hosts can ping each other through their tenant interfaces
+- All hosts can ping each other and their local gateway through tenant interfaces
+- Type-5 prefixes carry the L3 RT and originating VTEP/router MAC
+- Tenant VRF, L3 VNI, SVI gateways, MACs and interface memberships are correct
+- The remote VLAN 20 prefix is installed in both FRR and the Linux tenant FIB
 
 ## Prerequisites
 
@@ -267,12 +270,12 @@ EVPN; no additional BGP sessions or ASNs are introduced.
 | --- | --- | --- | --- |
 | host01 | 192.168.10.11/24 | 02:00:00:00:10:01 | eth1 to leaf01 swp3 |
 | host02 | 192.168.10.12/24 | 02:00:00:00:10:02 | eth1 to leaf02 swp3 |
+| host03 | 192.168.20.21/24 | 02:00:00:00:20:03 | eth1 to leaf02 swp4 |
 
-`inventories/lab/group_vars/all.yml` defines the single segment: **VLAN 10 →
-VNI 10100**, subnet `192.168.10.0/24`, and tenant MTU 1500. Leaf VTEP sources
-reference existing `loopback_ip` values. Host inventory defines attachments and
-addresses; the prefix length comes from the tenant subnet. The topology is
-now generated from the same inventory, including the unchanged underlay links.
+`inventories/lab/group_vars/all.yml` defines tenant and segment data. Leaf VTEP
+sources reference existing `loopback_ip` values. Host inventory references a
+segment and defines its attachment, MAC, and address. The topology is generated
+from that inventory, including the unchanged underlay links.
 
 Leaves enable `advertise-all-vni` and share the explicit import/export route
 target `65000:10100`. The shared `evpn_rt_admin: 65000` in
@@ -280,8 +283,8 @@ target `65000:10100`. The shared `evpn_rt_admin: 65000` in
 the VNI supplies the 32-bit assigned number. Thus VNI 101000 produces
 `65000:101000`, and the full valid VNI range (1–16777215) remains representable.
 This administrator is an RT namespace, not a new router ASN. Route
-distinguishers remain FRR-generated (observed as `10.255.0.11:2` and
-`10.255.0.12:2`); their assigned values are independent of the VNI. The explicit shared
+distinguishers remain FRR-generated; their assigned values are independent of
+the VNI. The explicit shared
 RT avoids differing leaf ASNs producing different export RTs. Spines preserve
 EVPN next hops with `attribute-unchanged next-hop`, so remote traffic goes to
 the originating leaf, not a spine. IPv4 next-hop behavior remains unchanged.
@@ -291,24 +294,24 @@ the originating leaf, not a spine. IPv4 next-hop behavior remains unchanged.
 `make deploy` runs `playbooks/configure_overlay.yml` after Containerlab:
 
 - Each leaf gets one traditional, VLAN-unaware bridge `br10` representing the
-  VLAN 10 access broadcast domain, with untagged `swp3` attached.
+  VLAN 10 access broadcast domain, with untagged `swp3` attached. Phase 2
+  adds `br20` / `vxlan10200` and untagged `swp4` on leaf02.
 - `vxlan10100` joins that bridge, uses the leaf loopback as its local address,
   and encapsulates with UDP port 4789. No static remote VTEP is configured.
 - VXLAN learning and bridge-port learning on the VXLAN port are disabled;
   FRR/Zebra installs remote MACs and VTEP membership learned through EVPN.
   Host-facing MAC learning remains enabled. ARP suppression is enabled on the
   VXLAN bridge port.
-- The bridge has no gateway IP. IPv4/IPv6 forwarding and IPv6 address generation
-  are disabled there. `arp_accept=1` lets gratuitous ARP populate dynamic host
-  IP/MAC bindings on the unnumbered bridge.
+- Phase 1 used unnumbered bridges with routing disabled. Phase 2 places the
+  L2 bridges in `tenant-a`, assigns gateways, and enables IPv4 forwarding.
+  IPv6 remains disabled. `arp_accept=1` retains gratuitous ARP host learning.
 - Hosts receive deterministic MAC/IP addresses. `make test` sends gratuitous
   ARP before checking Type-2 IP bindings and pinging in both directions.
 
 This follows FRR's [traditional bridge/VXLAN integration model](https://docs.frrouting.org/en/stable-10.7/evpn.html).
 There are no 802.1Q trunks: VLAN 10 is represented by its dedicated bridge.
 FRR may report the bridge's internal/default VLAN as `1`; this is not a second
-tenant or the configured VNI. A VLAN-aware bridge would be a separate extension
-for multiple VLANs. The host MTU is 1500; the existing Containerlab underlay
+tenant or the configured VNI. Phase 2 retains a separate traditional bridge for each local segment. The host MTU is 1500; the existing Containerlab underlay
 links retain their 9500-byte MTU, leaving room for VXLAN overhead.
 
 Linux state is ephemeral and recreated on deployment. The setup playbook can
@@ -347,7 +350,72 @@ The runtime assertions use FRR and Linux JSON with bounded convergence retries.
 Traffic is bound to host `eth1` so management networking cannot satisfy the
 connectivity checks. Gratuitous ARP refreshes IP bindings for repeatable tests;
 these are dynamically learned entries and can age out in an idle lab.
-There is no Type-5 export, L3 VNI, tenant gateway, or inter-VLAN routing.
+Phase 2 adds the routed overlay below.
+
+## Phase 2 routed EVPN/VXLAN
+
+One tenant, `tenant-a`, uses Linux VRF table 10000 and **L3 VNI 10000**.
+
+| Segment | L2 VNI | Subnet | Gateway | Leaves | RT |
+| --- | --- | --- | --- | --- | --- |
+| VLAN 10 | 10100 | 192.168.10.0/24 | 192.168.10.1/24 | Both | 65000:10100 |
+| VLAN 20 | 10200 | 192.168.20.0/24 | 192.168.20.1/24 | leaf02 | 65000:10200 |
+
+The L3 import/export RT is `65000:10000`: L2 RTs select Ethernet broadcast
+domains, while this RT selects tenant IP routes. All use the existing fixed
+16-bit RT administrator and support the full valid VNI range. FRR generates
+unique per-VTEP/per-instance RDs independently of VNI values.
+
+`make deploy` creates kernel interfaces; FRR discovers them through Netlink.
+Each local L2 bridge acts as its segment SVI and belongs to `tenant-a`.
+The SVI gateway MAC `02:00:00:00:00:01` is defined once and shared: VLAN 10
+hosts resolve the same default gateway IP/MAC on either leaf, allowing local
+routing. Gateway bindings are not advertised with `advertise-svi-ip`.
+`br10000` also belongs to the VRF, remains unnumbered, and holds `vxlan10000`.
+Its router MAC is unique per leaf, distinct from the shared gateway MAC.
+VXLAN uses loopback sources, UDP 4789, disabled dynamic tunnel learning,
+and Zebra-programmed remote forwarding state. IPv4 forwarding is enabled;
+IPv6 and reverse-path filtering on tenant SVIs are disabled.
+
+FRR associates the VRF with L3 VNI 10000 and runs a tenant BGP instance.
+Explicit `network` statements originate only locally connected segment
+prefixes; `advertise ipv4 unicast` exports them as genuine **Type-5** routes.
+There are no extra BGP sessions: the original eBGP EVPN sessions and spines
+carry them with their originating leaf next hops. No tenants leak routes.
+
+Same-subnet host01 ↔ host02 traffic remains bridged through L2 VNI 10100.
+For host01 → host03, leaf01 routes at its local gateway, looks up the tenant
+route, and sends a routed Ethernet frame to leaf02 through L3 VNI 10000.
+Leaf02 routes again into VLAN 20. These two tenant routing lookups are
+**symmetric IRB**. EVPN Type-2 imported /32 host routes can take precedence in
+either direction through the L3 VNI; Type-5 supplies installed /24 subnet
+reachability rather than replacing Type-2 host routing.
+
+VLAN 20 is deliberately instantiated only on leaf02. Leaf01 therefore has no
+connected VLAN 20 route or L2 VNI 10200, making its remote /24 installation
+and host03 traffic evidence of routed EVPN. VLAN 10 is distributed on both
+leaves; its shared /24 remains connected on each leaf, so the remote Type-5
+copy is visible in EVPN but cannot displace that connected route.
+
+`make test` retains underlay, Type-2/Type-3, VLAN 10 MAC/neighbor, and both
+same-subnet ping checks. It adds prefix/VTEP/router-MAC/L3-RT assertions,
+VRF/L3-VNI/SVI checks, FRR and kernel remote-prefix installation, gateway
+pings, and all directed host pairs (including host01 ↔ host03). Host pings
+use `eth1` and full 1500-byte IP packets; convergence retries are bounded.
+The former Phase 1 assertions that routing was disabled, bridges were
+unnumbered, and no Type-5 existed are replaced by the corresponding Phase 2
+routing assertions. All Phase 1 traffic and control-plane checks remain.
+
+While deployed, inspect the routed overlay with:
+
+```bash
+docker exec clab-fabric-leaf01 vtysh -c "show evpn vni 10000 json"
+docker exec clab-fabric-leaf01 vtysh -c "show bgp l2vpn evpn route type prefix json"
+docker exec clab-fabric-leaf01 vtysh -c "show ip route vrf tenant-a json"
+docker exec clab-fabric-leaf01 ip -j route show vrf tenant-a
+docker exec clab-fabric-host01 ping -I eth1 -c 3 192.168.20.21
+docker exec clab-fabric-host03 ping -I eth1 -c 3 192.168.10.11
+```
 
 ## Technologies
 
