@@ -13,6 +13,11 @@ interface {{ interface.name }}
  ip address {{ interface.ip }}
 {% endfor %}
 
+{% if role == 'leaf' %}
+vrf {{ tenant.name }}
+ vni {{ tenant.l3_vni }}
+exit-vrf
+{% endif %}
 router bgp {{ asn }}
  bgp router-id {{ loopback_ip }}
  no bgp ebgp-requires-policy
@@ -29,9 +34,28 @@ router bgp {{ asn }}
 {% endfor %}
 {% if role == 'leaf' %}
   advertise-all-vni
-  vni {{ tenant.vni }}
-   route-target import {{ overlay_route_target }}
-   route-target export {{ overlay_route_target }}
+{% for segment in segments if inventory_hostname in segment.leaves %}
+  vni {{ segment.vni }}
+   route-target import {{ evpn_rt_admin }}:{{ segment.vni }}
+   route-target export {{ evpn_rt_admin }}:{{ segment.vni }}
   exit-vni
+{% endfor %}
 {% endif %}
  exit-address-family
+{% if role == 'leaf' %}
+exit
+
+router bgp {{ asn }} vrf {{ tenant.name }}
+ bgp router-id {{ loopback_ip }}
+ no bgp ebgp-requires-policy
+ address-family ipv4 unicast
+{% for segment in segments if inventory_hostname in segment.leaves %}
+  network {{ segment.subnet }}
+{% endfor %}
+ exit-address-family
+ address-family l2vpn evpn
+  route-target import {{ l3_route_target }}
+  route-target export {{ l3_route_target }}
+  advertise ipv4 unicast
+ exit-address-family
+{% endif %}

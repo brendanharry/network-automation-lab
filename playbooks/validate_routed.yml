@@ -1,0 +1,138 @@
+---
+- name: Validate tenant VRF and symmetric IRB forwarding
+  hosts: leafs
+  connection: local
+  gather_facts: false
+  vars:
+    local_segments: >-
+      {{ segments | selectattr('leaves', 'contains',
+         inventory_hostname) | list }}
+  tasks:
+    - name: Read Linux VRF and interface state
+      ansible.builtin.command:
+        argv: [docker, exec, "clab-fabric-{{ inventory_hostname }}",
+               ip, -d, -j, link, show]
+      register: routed_links
+      changed_when: false
+
+    - name: Verify VRF table and L3 bridge membership
+      vars:
+        links: "{{ routed_links.stdout | from_json }}"
+        vrf: >-
+          {{ links | selectattr('ifname', 'equalto', tenant.name) | first }}
+        bridge: >-
+          {{ links | selectattr('ifname', 'equalto', l3_bridge) | first }}
+        vxlan: "{{ links | selectattr('ifname', 'equalto', l3_vxlan) | first }}"
+      ansible.builtin.assert:
+        that:
+          - vrf.linkinfo.info_kind == 'vrf'
+          - vrf.linkinfo.info_data.table == tenant.table
+          - "'UP' in vrf.flags"
+          - bridge.master == tenant.name
+          - bridge.address == router_mac
+          - vxlan.master == l3_bridge
+          - vxlan.linkinfo.info_data.id == tenant.l3_vni
+          - vxlan.linkinfo.info_data.local == vtep_source
+          - vxlan.linkinfo.info_data.port == 4789
+          - not vxlan.linkinfo.info_data.learning
+          - vxlan.linkinfo.info_data.remote is not defined
+          - vxlan.linkinfo.info_slave_data.learning == 0
+          - "'UP' in bridge.flags and 'UP' in vxlan.flags"
+          - bridge.mtu == tenant.mtu and vxlan.mtu == tenant.mtu
+
+    - name: Wait for FRR L3 VNI association
+      ansible.builtin.command:
+        argv: [docker, exec, "clab-fabric-{{ inventory_hostname }}", vtysh, -c,
+               "show evpn vni {{ tenant.l3_vni }} json"]
+      register: routed_vni
+      changed_when: false
+      until: >-
+        (routed_vni.stdout | from_json).type | default('') == 'L3'
+        and (routed_vni.stdout | from_json).state | default('') == 'Up'
+      retries: 12
+      delay: 2
+
+    - name: Verify FRR L3 VNI and local L2 associations
+      vars:
+        vni: "{{ routed_vni.stdout | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - vni.vni == tenant.l3_vni
+          - vni.tenantVrf == tenant.name
+          - vni.bridge == l3_bridge and vni.sviIntf == l3_bridge
+          - vni.vxlanIntf == l3_vxlan
+          - vni.localVtepIp == vtep_source
+          - vni.routerMac == router_mac
+          - >-
+            vni.l2Vnis | symmetric_difference(
+              local_segments | map(attribute='vni') | list) | length == 0
+
+    - name: Verify the L3 SVI is unnumbered
+      ansible.builtin.command:
+        argv: [docker, exec, "clab-fabric-{{ inventory_hostname }}",
+               ip, -j, address, show, dev, "{{ l3_bridge }}"]
+      register: l3_addresses
+      changed_when: false
+      failed_when: (l3_addresses.stdout | from_json | first).addr_info != []
+
+    - name: Validate every local L2 SVI and attachment
+      ansible.builtin.include_tasks: tasks/validate_segment.yml
+      loop: "{{ local_segments }}"
+      loop_control:
+        loop_var: checked_segment
+        label: "{{ checked_segment.name }}"
+
+    - name: Validate remote Type-5 forwarding for nonlocal subnets
+      ansible.builtin.include_tasks: tasks/validate_prefix.yml
+      loop: >-
+        {{ segments | rejectattr('leaves', 'contains', inventory_hostname) }}
+      loop_control:
+        loop_var: remote_segment
+        label: "{{ remote_segment.subnet }}"
+
+    - name: Verify routed host lookups use the remote VTEP and L3 SVI
+      vars:
+        source: "{{ hostvars[item.0] }}"
+        destination: "{{ hostvars[item.1] }}"
+        source_segment: >-
+          {{ segments | selectattr('name', 'equalto', source.segment) | first }}
+        expected_vtep: "{{ hostvars[destination.attachment.leaf].vtep_source }}"
+      ansible.builtin.command:
+        argv: [docker, exec, "clab-fabric-{{ inventory_hostname }}",
+               ip, -j, route, get, "{{ destination.ip_address }}",
+               from, "{{ source.ip_address }}", iif,
+               "br{{ source_segment.vlan }}", vrf, "{{ tenant.name }}"]
+      loop: "{{ groups['test_hosts'] | permutations(2) | list }}"
+      when:
+        - source.attachment.leaf == inventory_hostname
+        - destination.attachment.leaf != inventory_hostname
+        - source.segment != destination.segment
+      register: routed_lookup
+      changed_when: false
+      until: >-
+        routed_lookup.rc == 0
+        and (routed_lookup.stdout | from_json | first).dev == l3_bridge
+        and (routed_lookup.stdout | from_json | first).gateway == expected_vtep
+      retries: 12
+      delay: 2
+      loop_control:
+        label: "{{ item.0 }} to {{ item.1 }}"
+
+- name: Validate host gateway reachability
+  hosts: test_hosts
+  connection: local
+  gather_facts: false
+  vars:
+    host_segment: >-
+      {{ segments | selectattr('name', 'equalto', segment) | first }}
+  tasks:
+    - name: Ping the local distributed gateway through tenant interface
+      ansible.builtin.command:
+        argv: [docker, exec, "clab-fabric-{{ inventory_hostname }}", ping,
+               -I, "{{ attachment.interface }}", -c, '3', -w, '5',
+               "{{ host_segment.gateway.split('/')[0] }}"]
+      register: gateway_ping
+      changed_when: false
+      until: gateway_ping.rc == 0
+      retries: 12
+      delay: 2

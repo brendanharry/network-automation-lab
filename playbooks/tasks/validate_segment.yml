@@ -1,0 +1,56 @@
+---
+- name: Read segment SVI addresses
+  ansible.builtin.command:
+    argv: [docker, exec, "clab-fabric-{{ inventory_hostname }}",
+           ip, -j, address, show, dev, "br{{ checked_segment.vlan }}"]
+  register: svi_addresses
+  changed_when: false
+
+- name: Verify gateway, shared MAC, VRF membership and host attachments
+  vars:
+    links: "{{ routed_links.stdout | from_json }}"
+    bridge: >-
+      {{ links | selectattr('ifname', 'equalto', 'br' ~ checked_segment.vlan)
+         | first }}
+    vxlan: >-
+      {{ links | selectattr('ifname', 'equalto', 'vxlan' ~ checked_segment.vni)
+         | first }}
+    local_ports: >-
+      {{ groups['test_hosts'] | map('extract', hostvars)
+         | selectattr('segment', 'equalto', checked_segment.name)
+         | selectattr('attachment.leaf', 'equalto', inventory_hostname)
+         | map(attribute='attachment.leaf_interface') | list }}
+  ansible.builtin.assert:
+    that:
+      - bridge.master == tenant.name
+      - bridge.address == tenant.gateway_mac
+      - bridge.linkinfo.info_data.vlan_filtering == 0
+      - vxlan.master == bridge.ifname
+      - vxlan.linkinfo.info_data.id == checked_segment.vni
+      - vxlan.linkinfo.info_data.local == vtep_source
+      - not vxlan.linkinfo.info_data.learning
+      - vxlan.linkinfo.info_slave_data.learning == 0
+      - "'UP' in bridge.flags and 'UP' in vxlan.flags"
+      - >-
+        (svi_addresses.stdout | from_json | first).addr_info
+        | selectattr('family', 'equalto', 'inet') | map(attribute='local')
+        | list == [checked_segment.gateway.split('/')[0]]
+      - >-
+        (svi_addresses.stdout | from_json | first).addr_info
+        | selectattr('family', 'equalto', 'inet') | map(attribute='prefixlen')
+        | list == [checked_segment.gateway.split('/')[1] | int]
+      - >-
+        local_ports | difference(links | selectattr('master', 'defined')
+          | selectattr('master', 'equalto', bridge.ifname)
+          | map(attribute='ifname') | list) | length == 0
+
+- name: Verify local FRR L2 VNI belongs to the tenant VRF
+  ansible.builtin.command:
+    argv: [docker, exec, "clab-fabric-{{ inventory_hostname }}", vtysh, -c,
+           "show evpn vni {{ checked_segment.vni }} json"]
+  register: segment_vni
+  changed_when: false
+  failed_when: >-
+    (segment_vni.stdout | from_json).type != 'L2'
+    or (segment_vni.stdout | from_json).tenantVrf != tenant.name
+    or (segment_vni.stdout | from_json).bridge != 'br' ~ checked_segment.vlan

@@ -1,0 +1,47 @@
+---
+- name: Wait for remote prefix installed in FRR tenant RIB and FIB
+  vars:
+    routes: >-
+      {{ (tenant_routes.stdout | from_json).get(remote_segment.subnet, []) }}
+    remote_vteps: >-
+      {{ remote_segment.leaves | map('extract', hostvars,
+         'vtep_source') | list }}
+  ansible.builtin.command:
+    argv: [docker, exec, "clab-fabric-{{ inventory_hostname }}", vtysh, -c,
+           "show ip route vrf {{ tenant.name }} json"]
+  register: tenant_routes
+  changed_when: false
+  until: >-
+    routes | selectattr('protocol', 'equalto', 'bgp')
+    | selectattr('selected') | selectattr('installed')
+    | map(attribute='nexthops') | flatten | selectattr('fib')
+    | selectattr('interfaceName', 'equalto', l3_bridge)
+    | map(attribute='ip') | intersect(remote_vteps) | length > 0
+  retries: 12
+  delay: 2
+
+- name: Wait for the remote prefix in Linux tenant forwarding table
+  vars:
+    remote_vteps: >-
+      {{ remote_segment.leaves | map('extract', hostvars,
+         'vtep_source') | list }}
+  ansible.builtin.command:
+    argv: [docker, exec, "clab-fabric-{{ inventory_hostname }}",
+           ip, -j, route, show, vrf, "{{ tenant.name }}"]
+  register: kernel_tenant_routes
+  changed_when: false
+  until: >-
+    kernel_tenant_routes.stdout | from_json
+    | selectattr('dst', 'equalto', remote_segment.subnet)
+    | selectattr('protocol', 'equalto', 'bgp')
+    | selectattr('dev', 'equalto', l3_bridge)
+    | map(attribute='gateway') | intersect(remote_vteps) | length > 0
+  retries: 12
+  delay: 2
+
+- name: Report observed Type-5 forwarding
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} VRF {{ tenant.name }}:
+      {{ kernel_tenant_routes.stdout | from_json
+         | selectattr('dst', 'equalto', remote_segment.subnet) | list }}

@@ -1,0 +1,46 @@
+---
+- name: Create bridge if absent
+  ansible.builtin.command:
+    argv: [docker, exec, "{{ container }}", ip, link, add,
+           "{{ bridge_name }}", type, bridge, stp_state, '0',
+           vlan_filtering, '0']
+  when: >-
+    bridge_name not in
+    (existing_links.stdout | from_json | map(attribute='ifname') | list)
+  changed_when: true
+
+- name: Create VXLAN if absent
+  ansible.builtin.command:
+    argv: [docker, exec, "{{ container }}", ip, link, add,
+           "{{ vxlan_name }}", type, vxlan, id, "{{ vni_id }}",
+           local, "{{ vtep_source }}", dstport, '4789', nolearning]
+  when: >-
+    vxlan_name not in
+    (existing_links.stdout | from_json | map(attribute='ifname') | list)
+  changed_when: true
+
+- name: Configure VRF membership and EVPN learning settings
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'exec', container] + item }}"
+  loop:
+    - [ip, link, set, "{{ bridge_name }}", master, "{{ tenant.name }}",
+       address, "{{ bridge_mac }}", addrgenmode, none, mtu,
+       "{{ tenant.mtu }}", up]
+    - [ip, link, set, "{{ vxlan_name }}", master, "{{ bridge_name }}",
+       addrgenmode, none, mtu, "{{ tenant.mtu }}", up]
+    - [ip, link, set, "{{ vxlan_name }}", type, bridge_slave,
+       learning, 'off', neigh_suppress, 'on']
+    - [sysctl, -w, "net.ipv4.conf.{{ bridge_name }}.arp_accept=1"]
+    - [sysctl, -w, "net.ipv4.conf.{{ bridge_name }}.forwarding=1"]
+    - [sysctl, -w, "net.ipv4.conf.{{ bridge_name }}.rp_filter=0"]
+    - [sysctl, -w, "net.ipv6.conf.{{ bridge_name }}.forwarding=0"]
+    - [sysctl, -w, "net.ipv6.conf.{{ bridge_name }}.disable_ipv6=1"]
+    - [sysctl, -w, "net.ipv6.conf.{{ vxlan_name }}.disable_ipv6=1"]
+  changed_when: true
+
+- name: Assign distributed gateway to L2 SVI only
+  ansible.builtin.command:
+    argv: [docker, exec, "{{ container }}", ip, address, replace,
+           "{{ gateway_address }}", dev, "{{ bridge_name }}"]
+  when: gateway_address is defined
+  changed_when: true

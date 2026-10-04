@@ -131,7 +131,7 @@
         fail_msg: "Duplicate underlay IP addresses detected."
         success_msg: "All underlay IP addresses are unique."
 
-- name: Validate Phase 1 tenant and host attachments
+- name: Validate tenant and host attachments
   hosts: localhost
   gather_facts: false
   vars:
@@ -144,22 +144,72 @@
           - evpn_rt_admin >= 0 and evpn_rt_admin <= 65535
         fail_msg: EVPN RT administrator must be a 16-bit integer.
 
-    - name: Check the single L2 segment
+    - name: Check tenant VRF and VNI uniqueness
       ansible.builtin.assert:
         that:
-          - tenant.vlan is integer
-          - tenant.vlan >= 1 and tenant.vlan <= 4094
-          - tenant.vni is integer
-          - tenant.vni >= 1 and tenant.vni <= 16777215
+          - tenant.name is match('^[a-z][a-z0-9-]{0,14}$')
+          - tenant.l3_vni is integer
+          - tenant.l3_vni >= 1 and tenant.l3_vni <= 16777215
+          - tenant.table is integer and tenant.table > 255
+          - tenant.l3_vni not in (segments | map(attribute='vni') | list)
+          - >-
+              segments | map(attribute='vni') | unique | length == segments |
+              length
+          - >-
+              segments | map(attribute='vlan') | unique | length == segments |
+              length
+          - >-
+              segments | map(attribute='name') | unique | length == segments |
+              length
+          - >-
+              segments | map(attribute='subnet') | unique | length == segments |
+              length
+          - >-
+            l3_bridge not in (segments | map(attribute='vlan') | map('string')
+              | map('regex_replace', '^', 'br') | list)
+          - >-
+            tenant.name not in (['lo', 'eth0', l3_bridge, l3_vxlan]
+              + (segments | map(attribute='vlan') | map('string')
+                 | map('regex_replace', '^', 'br') | list)
+              + (segments | map(attribute='vni') | map('string')
+                 | map('regex_replace', '^', 'vxlan') | list))
+          - tenant.gateway_mac is match('^02(:[0-9a-f]{2}){5}$')
+          - >-
+            groups['leafs'] | map('extract', hostvars, 'router_mac')
+            | unique | length == groups['leafs'] | length
+          - >-
+            tenant.gateway_mac not in
+            (groups['leafs'] | map('extract', hostvars, 'router_mac') | list)
+
+    - name: Check L2 segments
+      ansible.builtin.assert:
+        that:
+          - item.vlan is integer
+          - item.vlan >= 1 and item.vlan <= 4094
+          - item.vni is integer
+          - item.vni >= 1 and item.vni <= 16777215
           - tenant.mtu is integer
           - tenant.mtu >= 1280 and tenant.mtu <= 9000
           - >-
-            tenant.subnet is match(
+            item.subnet is match(
               '^' ~ ipv4_octet ~ '\.' ~ ipv4_octet ~ '\.'
               ~ ipv4_octet ~ '\.0/24$')
-          - groups['test_hosts'] | length == 2
+          - item.tenant == tenant.name
+          - item.leaves | length > 0
+          - item.leaves | difference(groups['leafs']) | length == 0
+          - item.leaves | unique | length == item.leaves | length
+          - >-
+            item.gateway is match(
+              '^' ~ ipv4_octet ~ '(\.' ~ ipv4_octet ~ '){3}/24$')
+          - item.gateway.split('/')[1] == '24'
+          - >-
+              item.gateway.split('/')[0].split('.')[:3] ==
+              item.subnet.split('.')[0:3]
+          - item.gateway.split('/')[0].split('.')[3] | int > 0
+          - item.gateway.split('/')[0].split('.')[3] | int < 255
         fail_msg: >-
-          Phase 1 requires one valid VLAN/VNI, a /24, and two test hosts.
+          Each tenant segment requires a valid VLAN/VNI, /24 and gateway.
+      loop: "{{ segments }}"
 
     - name: Check VTEP addresses reuse leaf loopbacks
       ansible.builtin.assert:
@@ -173,9 +223,13 @@
     - name: Check host attachment and addressing
       vars:
         host: "{{ hostvars[item] }}"
+        host_segment: >-
+          {{ segments | selectattr('name', 'equalto', host.segment) | first }}
       ansible.builtin.assert:
         that:
-          - host.attachment.leaf in groups['leafs']
+          - host.segment in (segments | map(attribute='name') | list)
+          - host.attachment.leaf in host_segment.leaves
+          - host.ip_address != host_segment.gateway.split('/')[0]
           - host.attachment.leaf_interface is match('^swp[0-9]+$')
           - host.attachment.leaf_interface | length <= 15
           - >-
@@ -189,19 +243,41 @@
               '^' ~ ipv4_octet ~ '(\.' ~ ipv4_octet ~ '){3}$')
           - >-
             host.ip_address.split('.')[:3]
-            == tenant.subnet.split('/')[0].split('.')[:3]
+            == host_segment.subnet.split('/')[0].split('.')[:3]
           - host.ip_address.split('.')[3] | int > 0
           - host.ip_address.split('.')[3] | int < 255
+          - host.mac_address != tenant.gateway_mac
+          - >-
+            host.mac_address not in (groups['leafs']
+              | map('extract', hostvars, 'router_mac') | list)
           - host.mac_address is match('^02(:[0-9a-f]{2}){5}$')
       loop: "{{ groups['test_hosts'] }}"
 
     - name: Check host identities are unique and cover both leaves
       vars:
-        hosts: "{{ groups['test_hosts'] | map('extract', hostvars) | list }}"
+        test_host_data: >-
+          {{ groups['test_hosts'] | map('extract', hostvars) | list }}
       ansible.builtin.assert:
         that:
-          - hosts | map(attribute='ip_address') | unique | length == 2
-          - hosts | map(attribute='mac_address') | unique | length == 2
           - >-
-            hosts | map(attribute='attachment.leaf') | list
+              test_host_data | map(attribute='ip_address') | unique | length ==
+              groups['test_hosts'] | length
+          - >-
+              test_host_data | map(attribute='mac_address') | unique | length ==
+              groups['test_hosts'] | length
+          - >-
+            test_host_data | map(attribute='attachment.leaf') | list
             | symmetric_difference(groups['leafs']) | length == 0
+
+    - name: Check attachment ports do not collide
+      vars:
+        local_hosts: >-
+          {{ groups['test_hosts'] | map('extract', hostvars)
+             | selectattr('attachment.leaf', 'equalto', item) | list }}
+      ansible.builtin.assert:
+        that:
+          - >-
+            local_hosts | map(attribute='attachment.leaf_interface')
+            | unique | length == local_hosts | length
+          - hostvars[item].router_mac is match('^02(:[0-9a-f]{2}){5}$')
+      loop: "{{ groups['leafs'] }}"

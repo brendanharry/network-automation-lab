@@ -1,13 +1,28 @@
 ---
 tenant:
-  vlan: 10
-  vni: 10100
-  subnet: 192.168.10.0/24
+  name: tenant-a
+  l3_vni: 10000
+  table: 10000
+  gateway_mac: "02:00:00:00:00:01"
   mtu: 1500
-# A shared RT is required across the different leaf ASNs.
-# This is an RT namespace, not another BGP ASN.
+segments:
+  - name: vlan10
+    tenant: tenant-a
+    vlan: 10
+    vni: 10100
+    subnet: 192.168.10.0/24
+    gateway: 192.168.10.1/24
+    leaves: [leaf01, leaf02]
+  - name: vlan20
+    tenant: tenant-a
+    vlan: 20
+    vni: 10200
+    subnet: 192.168.20.0/24
+    gateway: 192.168.20.1/24
+    leaves: [leaf02]
+# Fixed two-octet administrator permits the full 24-bit VNI range.
 evpn_rt_admin: 65000
-overlay_route_target: "{{ evpn_rt_admin }}:{{ tenant.vni }}"
-overlay_bridge: "br{{ tenant.vlan }}"
-overlay_vxlan: "vxlan{{ tenant.vni }}"
+l3_route_target: "{{ evpn_rt_admin }}:{{ tenant.l3_vni }}"
+l3_bridge: "br{{ tenant.l3_vni }}"
+l3_vxlan: "vxlan{{ tenant.l3_vni }}"
 host_image: alpine:3.22.5

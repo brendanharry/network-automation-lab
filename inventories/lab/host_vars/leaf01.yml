@@ -12,3 +12,5 @@ underlay_interfaces:
     peer: spine02
     ip: 10.0.0.3/31
     peer_ip: 10.0.0.2
+
+router_mac: "02:00:00:00:01:01"
