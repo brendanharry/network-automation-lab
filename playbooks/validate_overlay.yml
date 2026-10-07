@@ -78,6 +78,8 @@
         evpn_summary.rc == 0
         and (evpn_summary.stdout | from_json).peers is defined
         and underlay_interfaces | map(attribute='peer_ip') | list
+        | difference((inactive_evpn_peers | default({})).get(
+            inventory_hostname, []))
         | symmetric_difference(
             (evpn_summary.stdout | from_json).peers | dict2items
             | selectattr('value.state', 'equalto', 'Established')
