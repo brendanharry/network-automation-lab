@@ -1,4 +1,13 @@
-.PHONY: help build validate deploy test destroy verify
+.DEFAULT_GOAL := help
+
+.PHONY: help build validate deploy test destroy verify resilience
+
+resilience:
+	$(MAKE) build
+	$(MAKE) validate
+	$(MAKE) deploy
+	ansible-playbook -i inventories/lab/hosts.yml playbooks/validate_resilience.yml
+	$(MAKE) destroy
 
 help:
 	@echo "Available targets:"
@@ -7,6 +16,7 @@ help:
 	@echo "  deploy    Deploy or reconfigure the Containerlab fabric"
 	@echo "  test      Validate the running fabric"
 	@echo "  destroy   Destroy the Containerlab fabric"
+	@echo "  resilience  Validate single-link failure, recovery, and destroy"
 	@echo "  verify    Run build, validate, deploy, test, and destroy"
 
 build:

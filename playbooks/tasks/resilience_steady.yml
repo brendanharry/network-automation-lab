@@ -1,0 +1,18 @@
+---
+- name: Run existing bounded steady-state validation
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python | dirname }}/ansible-playbook"
+      - -i
+      - "{{ inventory_file }}"
+      - "{{ playbook_dir }}/{{ item }}"
+  loop: "{{ validation_playbooks }}"
+  register: steady_validation
+  changed_when: false
+
+- name: Report steady-state control-plane and service evidence
+  ansible.builtin.debug:
+    msg: "{{ item.stdout }}"
+  loop: "{{ steady_validation.results }}"
+  loop_control:
+    label: "{{ item.item }}"

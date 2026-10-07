@@ -1,0 +1,117 @@
+---
+- name: Validate controlled single-link failure and recovery
+  hosts: localhost
+  gather_facts: false
+  vars:
+    fabric_nodes: "{{ groups['leafs'] | union(groups['spines']) }}"
+    failed_link: >-
+      {{ hostvars.leaf01.underlay_interfaces
+         | selectattr('name', 'equalto', 'swp1') | first }}
+    reverse_link: >-
+      {{ hostvars.spine01.underlay_interfaces
+         | selectattr('name', 'equalto', 'swp1') | first }}
+    inactive_peers:
+      leaf01: ["{{ failed_link.peer_ip }}"]
+      spine01: ["{{ reverse_link.peer_ip }}"]
+    validation_playbooks:
+      - validate_runtime.yml
+      - validate_overlay.yml
+      - validate_routed.yml
+  tasks:
+    - name: Guard the exact failure interface mapping
+      ansible.builtin.assert:
+        that:
+          - failed_link.peer == 'spine01'
+          - reverse_link.peer == 'leaf01'
+          - failed_link.peer_ip == reverse_link.ip.split('/')[0]
+          - reverse_link.peer_ip == failed_link.ip.split('/')[0]
+
+    - name: BASELINE - run all steady-state validations
+      ansible.builtin.include_tasks: tasks/resilience_steady.yml
+
+    - name: Exercise failure with unconditional best-effort restoration
+      block:
+        - name: FAILURE - administratively disable leaf01 swp1
+          ansible.builtin.command:
+            argv: [docker, exec, clab-fabric-leaf01,
+                   ip, link, set, dev, swp1, down]
+          changed_when: true
+
+        - name: FAILURE - prove the interface is administratively down
+          ansible.builtin.command:
+            argv: [docker, exec, clab-fabric-leaf01,
+                   ip, -j, link, show, dev, swp1]
+          register: failed_interface
+          changed_when: false
+          failed_when: >-
+            'UP' in (failed_interface.stdout | from_json | first).flags
+
+        - name: FAILURE - check exact BGP and EVPN peer states on every router
+          ansible.builtin.include_tasks: tasks/resilience_peers.yml
+          loop: >-
+            {{ fabric_nodes | product(['neighbors', 'l2vpn evpn summary'])
+               | list }}
+          loop_control:
+            loop_var: peer_check
+            label: "{{ peer_check.0 }} {{ peer_check.1 }}"
+
+        - name: FAILURE - prove remote VTEP forwarding uses surviving spine
+          vars:
+            surviving_link: >-
+              {{ hostvars.leaf01.underlay_interfaces
+                 | selectattr('peer', 'equalto', 'spine02') | first }}
+          ansible.builtin.command:
+            argv: [docker, exec, clab-fabric-leaf01, ip, -j, route, get,
+                   "{{ hostvars.leaf02.vtep_source }}"]
+          register: surviving_route
+          changed_when: false
+          until: >-
+            surviving_route.rc == 0
+            and (surviving_route.stdout | from_json | first).dev
+                == surviving_link.name
+            and (surviving_route.stdout | from_json | first).gateway
+                == surviving_link.peer_ip
+          retries: 12
+          delay: 2
+
+        - name: FAILURE - validate overlay service and tenant RIB and FIB
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python | dirname }}/ansible-playbook"
+              - -i
+              - "{{ inventory_file }}"
+              - "{{ playbook_dir }}/{{ item }}"
+              - -e
+              - "{{ {'inactive_evpn_peers': inactive_peers} | to_json }}"
+          loop: [validate_overlay.yml, validate_routed.yml]
+          register: degraded_validation
+          changed_when: false
+
+        - name: FAILURE - report service and route evidence
+          ansible.builtin.debug:
+            msg: "{{ item.stdout }}"
+          loop: "{{ degraded_validation.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+      always:
+        - name: RECOVERY - restore leaf01 swp1 even after validation failure
+          ansible.builtin.command:
+            argv: [docker, exec, clab-fabric-leaf01,
+                   ip, link, set, dev, swp1, up]
+          register: restore_link
+          until: restore_link.rc == 0
+          retries: 3
+          delay: 2
+          changed_when: true
+
+        - name: RECOVERY - prove the interface is administratively up
+          ansible.builtin.command:
+            argv: [docker, exec, clab-fabric-leaf01,
+                   ip, -j, link, show, dev, swp1]
+          register: restored_interface
+          changed_when: false
+          failed_when: >-
+            'UP' not in (restored_interface.stdout | from_json | first).flags
+
+        - name: RECOVERY - rerun full convergence and service checks
+          ansible.builtin.include_tasks: tasks/resilience_steady.yml

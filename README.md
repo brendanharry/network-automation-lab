@@ -206,6 +206,39 @@ a successful run, it destroys the lab. If an earlier stage fails, Make stops; if
 occurred, the lab may remain running for inspection. Run `make destroy` after
 troubleshooting to clean it up.
 
+### Single-link resilience validation
+
+Run `make resilience` from the activated `.venv` to build, validate, deploy,
+check the baseline, inject a failure, prove degraded service, restore the link,
+check full recovery, and destroy the lab after success. Normal `make test` and
+`make verify` remain steady-state workflows.
+
+The failure is `docker exec clab-fabric-leaf01 ip link set dev swp1 down`,
+affecting only `leaf01:swp1 <-> spine01:swp1`. The test checks both ends leave
+Established while every unaffected inventory-defined BGP/EVPN peer stays
+Established. Leaf01 must forward to the remote VTEP through spine02 on swp2.
+Existing validation checks Type-2/3/5 EVPN state, tenant RIB/FIB state, and
+bidirectional host pings, including host01–host02 same-subnet VXLAN and
+host01–host03 routed EVPN connectivity, while the link is down.
+
+An Ansible `always` block restores swp1, with bounded retries, even when a
+failure-stage assertion fails; the original failure still fails the playbook.
+Full baseline validation then proves recovery using bounded convergence polling.
+Restoration is best effort: loss of Docker access or interruption of Ansible
+can prevent cleanup. Logs identify BASELINE, FAILURE, and RECOVERY evidence.
+This tests the usefulness of dual leaf-to-spine paths under a single-link
+failure; it does not test node failure or uninterrupted packet delivery during
+convergence.
+
+For troubleshooting against an already deployed lab, retain the containers:
+
+```bash
+ansible-playbook -i inventories/lab/hosts.yml playbooks/validate_resilience.yml
+```
+
+A failed lifecycle run leaves the lab available for inspection after attempted
+link restoration. Use `make destroy` when finished.
+
 ### Expected Result
 
 A successful run ends with an Ansible recap showing `failed=0`, followed by

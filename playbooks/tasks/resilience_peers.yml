@@ -1,0 +1,36 @@
+---
+- name: Wait for exact degraded peer state
+  vars:
+    node: "{{ peer_check.0 }}"
+    evpn: "{{ peer_check.1 != 'neighbors' }}"
+    peers: >-
+      {{ (peer_state.stdout | from_json).peers if evpn
+         else peer_state.stdout | from_json }}
+    expected: >-
+      {{ hostvars[node].underlay_interfaces
+         | map(attribute='peer_ip') | list }}
+    inactive: "{{ inactive_peers.get(node, []) }}"
+    state_key: "{{ 'state' if evpn else 'bgpState' }}"
+    established: >-
+      {{ peers | dict2items
+         | selectattr('value.' ~ state_key, 'equalto', 'Established')
+         | map(attribute='key') | list }}
+  ansible.builtin.command:
+    argv: [docker, exec, "clab-fabric-{{ node }}", vtysh, -c,
+           "show bgp {{ peer_check.1 }} json"]
+  register: peer_state
+  changed_when: false
+  until: >-
+    peer_state.rc == 0
+    and expected | symmetric_difference(peers.keys() | list) | length == 0
+    and expected | difference(inactive)
+        | symmetric_difference(established) | length == 0
+    and peers.values() | map(attribute='remoteAs') | map('int') | sort | list
+        == hostvars[node].underlay_interfaces | map(attribute='peer')
+           | map('extract', hostvars, 'asn') | map('int') | sort | list
+  retries: 12
+  delay: 2
+
+- name: Report degraded peer evidence including failed and surviving peers
+  ansible.builtin.debug:
+    msg: "{{ peer_check.0 }} {{ peer_check.1 }}: {{ peer_state.stdout }}"
