@@ -227,8 +227,7 @@ Full baseline validation then proves recovery using bounded convergence polling.
 Restoration is best effort: loss of Docker access or interruption of Ansible
 can prevent cleanup. Logs identify BASELINE, FAILURE, and RECOVERY evidence.
 This tests the usefulness of dual leaf-to-spine paths under a single-link
-failure; it does not test node failure or uninterrupted packet delivery during
-convergence.
+failure; it does not test uninterrupted packet delivery during convergence.
 
 For troubleshooting against an already deployed lab, retain the containers:
 
@@ -238,6 +237,55 @@ ansible-playbook -i inventories/lab/hosts.yml playbooks/validate_resilience.yml
 
 A failed lifecycle run leaves the lab available for inspection after attempted
 link restoration. Use `make destroy` when finished.
+
+### Single-spine resilience validation
+
+Run the opt-in scenario from the activated `.venv`:
+
+```bash
+make resilience-spine
+```
+
+This uses the same build, validate, deploy, baseline, failure, recovery, and
+successful teardown lifecycle as `make resilience`. It isolates all fabric
+ports on `clab-fabric-spine01` (`swp1` and `swp2`) with `ip link set ... down`,
+then runs `docker pause clab-fabric-spine01`. Both port states and the container
+pause state are asserted. Pausing alone leaves Linux forwarding active;
+isolating both ports makes the entire spine unavailable to the fabric. Keeping
+the container namespace avoids losing Containerlab veth links on stop/start.
+Inventory, topology, and routing configuration are unchanged.
+
+During failure, both leaves' spine01 IPv4/EVPN peers must leave Established.
+Both leaves' spine02 peers and both leaf peers on spine02 must remain
+Established with the expected ASNs. Both leaf VTEP route lookups must use
+spine02, and loopback-sourced pings check the surviving underlay. Existing
+validation runs on all surviving routers and hosts, retaining Type-2/3/5,
+tenant VRF, L3 VNI, required tenant RIB/FIB routes, and all directed host pings.
+This includes host01 ↔ host02 same-subnet VXLAN and host01 ↔ host03 routed EVPN
+with traffic bound to the tenant interface.
+
+An Ansible `always` block unpauses spine01 when necessary and restores both
+ports with bounded retries, including after partial injection or assertion
+failure. A nested `always` attempts port restoration even if container
+restoration fails. The original test failure still fails the playbook.
+Recovery checks running/unpaused container state, both ports, all four
+leaf/spine adjacencies, complete underlay routes, EVPN Type-2/3/5 state,
+tenant forwarding state, and bidirectional host connectivity using the full
+bounded steady-state checks. Both resilience scenarios automatically restore
+their failed component; restoration is best effort if Docker access is lost
+or Ansible is interrupted. No arbitrary recovery sleep is used.
+
+To retain an already deployed lab for inspection:
+
+```bash
+ansible-playbook -i inventories/lab/hosts.yml playbooks/validate_resilience_spine.yml
+```
+
+A failed lifecycle leaves the lab after attempted restoration; use
+`make destroy` after inspection. These are single-component resilience tests,
+not full HA testing, physical power-loss emulation, or production convergence
+benchmarks. Simultaneous failures, leaf/host failures, and packet-loss
+measurement during convergence remain outside these scenarios.
 
 ### Expected Result
 
