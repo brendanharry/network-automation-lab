@@ -1,12 +1,19 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help build validate deploy test destroy verify resilience
+.PHONY: help build validate deploy test destroy verify resilience resilience-spine
 
 resilience:
 	$(MAKE) build
 	$(MAKE) validate
 	$(MAKE) deploy
 	ansible-playbook -i inventories/lab/hosts.yml playbooks/validate_resilience.yml
+	$(MAKE) destroy
+
+resilience-spine:
+	$(MAKE) build
+	$(MAKE) validate
+	$(MAKE) deploy
+	ansible-playbook -i inventories/lab/hosts.yml playbooks/validate_resilience_spine.yml
 	$(MAKE) destroy
 
 help:
@@ -17,6 +24,7 @@ help:
 	@echo "  test      Validate the running fabric"
 	@echo "  destroy   Destroy the Containerlab fabric"
 	@echo "  resilience  Validate single-link failure, recovery, and destroy"
+	@echo "  resilience-spine  Validate single-spine failure, recovery, and destroy"
 	@echo "  verify    Run build, validate, deploy, test, and destroy"
 
 build:

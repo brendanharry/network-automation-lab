@@ -1,0 +1,188 @@
+---
+- name: Validate controlled single-spine failure and recovery
+  hosts: localhost
+  gather_facts: false
+  vars:
+    failed_container: clab-fabric-spine01
+    failed_ports: "{{ hostvars.spine01.underlay_interfaces }}"
+    surviving_nodes: "{{ groups['leafs'] | union(['spine02']) }}"
+    inactive_peers:
+      leaf01: >-
+        {{ hostvars.leaf01.underlay_interfaces
+           | selectattr('peer', 'equalto', 'spine01')
+           | map(attribute='peer_ip') | list }}
+      leaf02: >-
+        {{ hostvars.leaf02.underlay_interfaces
+           | selectattr('peer', 'equalto', 'spine01')
+           | map(attribute='peer_ip') | list }}
+    validation_playbooks:
+      - validate_runtime.yml
+      - validate_overlay.yml
+      - validate_routed.yml
+  tasks:
+    - name: Guard the exact failed node and fabric ports
+      ansible.builtin.assert:
+        that:
+          - groups['leafs'] | sort == ['leaf01', 'leaf02']
+          - groups['spines'] | sort == ['spine01', 'spine02']
+          - failed_ports | map(attribute='name') | sort == ['swp1', 'swp2']
+          - failed_ports | map(attribute='peer') | sort == ['leaf01', 'leaf02']
+          - inactive_peers.leaf01 | length == 1
+          - inactive_peers.leaf02 | length == 1
+
+    - name: BASELINE - run all steady-state validations
+      ansible.builtin.include_tasks: tasks/resilience_steady.yml
+
+    - name: Exercise whole-spine isolation with unconditional restoration
+      block:
+        # Pause alone freezes FRR but leaves kernel forwarding active. Isolate
+        # both fabric ports first; retain the namespace/veths for recovery.
+        - name: FAILURE - disable every spine01 fabric port
+          ansible.builtin.command:
+            argv: [docker, exec, "{{ failed_container }}",
+                   ip, link, set, dev, "{{ item.name }}", down]
+          loop: "{{ failed_ports }}"
+          changed_when: true
+
+        - name: FAILURE - prove both fabric ports are down
+          ansible.builtin.command:
+            argv: [docker, exec, "{{ failed_container }}",
+                   ip, -j, link, show, dev, "{{ item.name }}"]
+          loop: "{{ failed_ports }}"
+          register: isolated_port
+          changed_when: false
+          failed_when: >-
+            'UP' in (isolated_port.stdout | from_json | first).flags
+
+        - name: FAILURE - freeze the entire spine01 container
+          ansible.builtin.command:
+            argv: [docker, pause, "{{ failed_container }}"]
+          changed_when: true
+
+        - name: FAILURE - prove spine01 is paused
+          ansible.builtin.command:
+            argv: [docker, inspect, "{{ failed_container }}"]
+          register: failed_state
+          changed_when: false
+          failed_when: >-
+            not (failed_state.stdout | from_json | first).State.Paused
+
+        - name: FAILURE - check exact IPv4 and EVPN peer states
+          ansible.builtin.include_tasks: tasks/resilience_peers.yml
+          loop: >-
+            {{ surviving_nodes | product(['neighbors', 'l2vpn evpn summary'])
+               | list }}
+          loop_control:
+            loop_var: peer_check
+            label: "{{ peer_check.0 }} {{ peer_check.1 }}"
+
+        - name: FAILURE - prove both leaves forward remote VTEPs via spine02
+          vars:
+            surviving_link: >-
+              {{ hostvars[item.0].underlay_interfaces
+                 | selectattr('peer', 'equalto', 'spine02') | first }}
+          ansible.builtin.command:
+            argv: [docker, exec, "clab-fabric-{{ item.0 }}", ip, -j,
+                   route, get, "{{ hostvars[item.1].vtep_source }}"]
+          loop: "{{ groups['leafs'] | permutations(2) | list }}"
+          register: surviving_route
+          changed_when: false
+          until: >-
+            surviving_route.rc == 0
+            and (surviving_route.stdout | from_json | first).dev
+                == surviving_link.name
+            and (surviving_route.stdout | from_json | first).gateway
+                == surviving_link.peer_ip
+          retries: 12
+          delay: 2
+
+        - name: FAILURE - prove bidirectional underlay loopback reachability
+          ansible.builtin.command:
+            argv: [docker, exec, "clab-fabric-{{ item.0 }}", ping,
+                   -I, "{{ hostvars[item.0].loopback_ip }}", -c, '2', -w, '5',
+                   "{{ hostvars[item.1].loopback_ip }}"]
+          loop: "{{ surviving_nodes | permutations(2) | list }}"
+          register: underlay_ping
+          changed_when: false
+          until: underlay_ping.rc == 0
+          retries: 12
+          delay: 2
+
+        - name: FAILURE - validate overlay services and tenant RIB and FIB
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python | dirname }}/ansible-playbook"
+              - -i
+              - "{{ inventory_file }}"
+              - "{{ playbook_dir }}/{{ item }}"
+              - --limit
+              - '!spine01'
+              - -e
+              - "{{ {'inactive_evpn_peers': inactive_peers} | to_json }}"
+          loop: [validate_overlay.yml, validate_routed.yml]
+          register: degraded_validation
+          changed_when: false
+
+        - name: FAILURE - report service and route evidence
+          ansible.builtin.debug:
+            msg: "{{ item.stdout }}"
+          loop: "{{ degraded_validation.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+      always:
+        - name: RECOVERY - restore container execution even after failure
+          block:
+            - name: RECOVERY - inspect container pause state
+              ansible.builtin.command:
+                argv: [docker, inspect, "{{ failed_container }}"]
+              register: restore_state
+              changed_when: false
+              until: restore_state.rc == 0
+              retries: 3
+              delay: 2
+
+            - name: RECOVERY - unpause spine01 if paused
+              ansible.builtin.command:
+                argv: [docker, unpause, "{{ failed_container }}"]
+              when: (restore_state.stdout | from_json | first).State.Paused
+              register: restore_container
+              until: restore_container.rc == 0
+              retries: 3
+              delay: 2
+              changed_when: true
+          always:
+            - name: RECOVERY - attempt restoration of every fabric port
+              ansible.builtin.command:
+                argv: [docker, exec, "{{ failed_container }}",
+                       ip, link, set, dev, "{{ item.name }}", up]
+              loop: "{{ failed_ports }}"
+              register: restore_port
+              until: restore_port.rc == 0
+              retries: 3
+              delay: 2
+              changed_when: true
+
+        - name: RECOVERY - prove container is running and unpaused
+          ansible.builtin.command:
+            argv: [docker, inspect, "{{ failed_container }}"]
+          register: recovered_state
+          changed_when: false
+          until: >-
+            recovered_state.rc == 0
+            and (recovered_state.stdout | from_json | first).State.Running
+            and not (recovered_state.stdout | from_json | first).State.Paused
+          retries: 12
+          delay: 2
+
+        - name: RECOVERY - prove both fabric ports are up
+          ansible.builtin.command:
+            argv: [docker, exec, "{{ failed_container }}",
+                   ip, -j, link, show, dev, "{{ item.name }}"]
+          loop: "{{ failed_ports }}"
+          register: recovered_port
+          changed_when: false
+          failed_when: >-
+            'UP' not in (recovered_port.stdout | from_json | first).flags
+
+        - name: RECOVERY - rerun full convergence and service checks
+          ansible.builtin.include_tasks: tasks/resilience_steady.yml
